@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 import shutil
@@ -17,6 +18,11 @@ from pydantic import BaseModel
 
 from app.config import VisionConfigurationError, VisionSettings
 from app.database import Database
+from app.folder_scan_service import (
+    FolderScanError,
+    FolderScanService,
+    infer_media_created_at,
+)
 from app.search_service import SearchService, SearchValidationError
 from app.video_service import VideoProcessingError, extract_frames
 from app.vision_provider import DeepSeekVisionProvider, VisionProvider
@@ -41,21 +47,70 @@ def create_vision_provider() -> VisionProvider:
 
 
 vision_provider_factory: Callable[[], VisionProvider] = create_vision_provider
+folder_scan_service: FolderScanService | None = None
 
 
 class VisionStartRequest(BaseModel):
     force: bool = False
 
 
+class WatchFolderRequest(BaseModel):
+    path: str
+    auto_analyze: bool = False
+    scan_interval_seconds: int = 60
+
+
+class ScanStartRequest(BaseModel):
+    auto_analyze: bool | None = None
+
+
+async def folder_monitor_loop(service: FolderScanService) -> None:
+    while True:
+        now = datetime.now(timezone.utc)
+        for folder in database.list_watch_folders(enabled_only=True):
+            last_scan_at = folder.get("last_scan_at")
+            due = last_scan_at is None
+            if last_scan_at:
+                try:
+                    last_scan = datetime.fromisoformat(last_scan_at)
+                    due = (now - last_scan).total_seconds() >= int(
+                        folder["scan_interval_seconds"]
+                    )
+                except (TypeError, ValueError):
+                    due = True
+            if due:
+                try:
+                    service.start_scan(int(folder["id"]))
+                except (FolderScanError, sqlite3.Error):
+                    continue
+        await asyncio.sleep(10)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    global folder_scan_service
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     FRAME_DIR.mkdir(parents=True, exist_ok=True)
     database.initialize()
-    yield
+    folder_scan_service = FolderScanService(
+        database=database,
+        upload_dir=UPLOAD_DIR,
+        frame_dir=FRAME_DIR,
+        provider_factory=vision_provider_factory,
+    )
+    monitor_task = asyncio.create_task(
+        folder_monitor_loop(folder_scan_service), name="folder-monitor"
+    )
+    try:
+        yield
+    finally:
+        monitor_task.cancel()
+        await asyncio.gather(monitor_task, return_exceptions=True)
+        await folder_scan_service.shutdown()
+        folder_scan_service = None
 
 
-app = FastAPI(title="县媒智搜", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="AI媒资库", version="0.4.0", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "app" / "static"), name="static")
 app.mount("/media/videos", StaticFiles(directory=UPLOAD_DIR), name="videos")
 app.mount("/media/frames", StaticFiles(directory=FRAME_DIR), name="frames")
@@ -99,6 +154,10 @@ def serialize_video(record: dict | None) -> dict | None:
         "duration_ms": video["duration_ms"],
         "duration_seconds": video["duration_ms"] / 1000,
         "uploaded_at": video["uploaded_at"],
+        "media_created_at": video.get("media_created_at") or video["uploaded_at"],
+        "source_kind": video.get("source_kind") or "upload",
+        "index_status": video.get("index_status") or "pending_analysis",
+        "index_error": video.get("index_error"),
         "video_url": f"/media/videos/{video['stored_name']}",
         "frames": serialized_frames,
         "vision_progress": {
@@ -111,6 +170,33 @@ def serialize_video(record: dict | None) -> dict | None:
             "done": bool(serialized_frames) and completed == len(serialized_frames),
         },
     }
+
+
+def serialize_scan_job(job: dict | None) -> dict | None:
+    if job is None:
+        return None
+    total = int(job.get("discovered") or 0)
+    processed = int(job.get("processed") or 0)
+    return {
+        **job,
+        "auto_analyze": bool(job.get("auto_analyze")),
+        "progress_percent": round(processed / total * 100) if total else 0,
+    }
+
+
+def video_thumbnail_url(video: dict) -> str | None:
+    image_name = video.get("first_frame_image_name")
+    if not image_name or Path(image_name).name != image_name:
+        return None
+    if not (FRAME_DIR / video["id"] / image_name).is_file():
+        return None
+    return f"/media/frames/{video['id']}/{image_name}"
+
+
+def require_folder_scan_service() -> FolderScanService:
+    if folder_scan_service is None:
+        raise HTTPException(status_code=503, detail="文件夹监测服务尚未启动。")
+    return folder_scan_service
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -129,6 +215,138 @@ async def latest_video() -> dict:
     if video is None:
         raise HTTPException(status_code=404, detail="尚未上传视频。")
     return video
+
+
+@app.get("/api/videos")
+async def list_videos(limit: int = 200, offset: int = 0) -> dict:
+    if limit < 1 or limit > 500:
+        raise HTTPException(status_code=400, detail="limit 必须在 1 至 500 之间。")
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="offset 不能小于 0。")
+    videos = database.list_videos(limit=limit, offset=offset)
+    total = database.count_videos()
+    return {
+        "count": len(videos),
+        "total": total,
+        "offset": offset,
+        "has_more": offset + len(videos) < total,
+        "videos": [
+            {
+                "id": video["id"],
+                "original_name": video["original_name"],
+                "media_created_at": video.get("media_created_at")
+                or video["uploaded_at"],
+                "source_kind": video.get("source_kind") or "upload",
+                "index_status": video.get("index_status") or "pending_analysis",
+                "index_error": video.get("index_error"),
+                "thumbnail_url": video_thumbnail_url(video),
+                "frame_count": int(video.get("frame_count") or 0),
+                "success_count": int(video.get("success_count") or 0),
+                "failed_count": int(video.get("failed_count") or 0),
+                "processing_count": int(video.get("processing_count") or 0),
+                "pending_count": int(video.get("pending_count") or 0),
+            }
+            for video in videos
+        ],
+    }
+
+
+@app.get("/api/watch-folders")
+async def list_watch_folders() -> dict:
+    folders = database.list_watch_folders()
+    return {
+        "folders": [
+            {
+                **folder,
+                "enabled": bool(folder["enabled"]),
+                "auto_analyze": bool(folder["auto_analyze"]),
+                "latest_job": serialize_scan_job(
+                    {
+                        "id": folder["latest_job_id"],
+                        "status": folder["latest_job_status"],
+                        "auto_analyze": folder["auto_analyze"],
+                        "discovered": folder["discovered"],
+                        "processed": folder["processed"],
+                        "imported": folder["imported"],
+                        "skipped": folder["skipped"],
+                        "failed": folder["failed"],
+                        "current_file": folder["current_file"],
+                        "current_stage": folder["current_stage"],
+                        "error": folder["job_error"],
+                        "started_at": folder["started_at"],
+                        "finished_at": folder["finished_at"],
+                    }
+                    if folder["latest_job_id"]
+                    else None
+                ),
+            }
+            for folder in folders
+        ]
+    }
+
+
+def resolve_watch_folder(raw_path: str) -> Path:
+    cleaned = raw_path.strip()
+    if not cleaned or len(cleaned) > 2000:
+        raise HTTPException(status_code=400, detail="请输入有效的本地文件夹路径。")
+    try:
+        folder_path = Path(cleaned).resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail="文件夹不存在或无法访问。") from exc
+    if not folder_path.is_dir():
+        raise HTTPException(status_code=400, detail="指定路径不是文件夹。")
+    data_path = DATA_DIR.resolve()
+    if folder_path == data_path or data_path.is_relative_to(folder_path):
+        raise HTTPException(
+            status_code=400,
+            detail="不能监测项目 data 目录或它的上级目录，以免重复导入运行文件。",
+        )
+    return folder_path
+
+
+@app.post("/api/watch-folders", status_code=status.HTTP_201_CREATED)
+async def add_watch_folder(request: WatchFolderRequest) -> dict:
+    if request.scan_interval_seconds < 15 or request.scan_interval_seconds > 3600:
+        raise HTTPException(status_code=400, detail="扫描间隔必须在 15 到 3600 秒之间。")
+    folder_path = resolve_watch_folder(request.path)
+    folder = database.upsert_watch_folder(
+        path=str(folder_path),
+        auto_analyze=request.auto_analyze,
+        scan_interval_seconds=request.scan_interval_seconds,
+        created_at=datetime.now(timezone.utc).isoformat(),
+    )
+    try:
+        job = require_folder_scan_service().start_scan(int(folder["id"]))
+    except FolderScanError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"folder": folder, "job": serialize_scan_job(job)}
+
+
+@app.post("/api/watch-folders/{folder_id}/scan")
+async def scan_watch_folder(folder_id: int, request: ScanStartRequest) -> dict:
+    try:
+        job = require_folder_scan_service().start_scan(
+            folder_id, auto_analyze=request.auto_analyze
+        )
+    except FolderScanError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return serialize_scan_job(job)
+
+
+@app.delete("/api/watch-folders/{folder_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def remove_watch_folder(folder_id: int) -> None:
+    if database.get_active_scan_job(folder_id):
+        raise HTTPException(status_code=409, detail="目录正在扫描，请等待完成后再停止监测。")
+    if not database.delete_watch_folder(folder_id):
+        raise HTTPException(status_code=404, detail="未找到该监测目录。")
+
+
+@app.get("/api/scan-jobs/{job_id}")
+async def get_scan_job(job_id: str) -> dict:
+    job = database.get_scan_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="未找到该扫描任务。")
+    return serialize_scan_job(job)
 
 
 @app.get("/api/search")
@@ -223,6 +441,9 @@ async def upload_video(file: UploadFile = File(...)) -> dict:
             stored_name=stored_name,
             duration_ms=duration_ms,
             uploaded_at=uploaded_at,
+            media_created_at=infer_media_created_at(
+                Path(original_name), video_path.stat().st_mtime
+            ),
             frames=[(frame.timestamp_ms, frame.image_name) for frame in frames],
         )
     except HTTPException:

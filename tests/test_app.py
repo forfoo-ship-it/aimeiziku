@@ -130,7 +130,10 @@ def test_real_mp4_upload_extracts_frames_and_persists_timestamps(
 
     page = client.get("/")
     assert page.status_code == 200
-    assert "县媒智搜" in page.text
+    assert "AI媒资库" in page.text
+    assert "视频素材智能检索系统" in page.text
+    assert 'id="admin-console"' in page.text
+    assert 'id="admin-entry-button"' in page.text
     assert payload["video_url"] in page.text
 
 
@@ -141,6 +144,30 @@ def test_rejects_non_mp4(isolated_app, tmp_path: Path) -> None:
         files={"file": ("notes.txt", b"not a video", "text/plain")},
     )
     assert response.status_code == 415
+
+
+def test_video_library_lists_thumbnail_and_vision_progress(
+    isolated_app, tmp_path: Path
+) -> None:
+    client, *_ = isolated_app
+    source = tmp_path / "素材库列表测试.mp4"
+    make_test_video(source)
+    uploaded = upload_test_video(client, source)
+
+    response = client.get("/api/videos?limit=1&offset=0")
+    assert response.status_code == 200
+    library = response.json()
+    assert library["count"] == 1
+    assert library["total"] == 1
+    assert library["has_more"] is False
+    item = library["videos"][0]
+    assert item["id"] == uploaded["id"]
+    assert item["thumbnail_url"] == uploaded["frames"][0]["image_url"]
+    assert item["frame_count"] == 3
+    assert item["pending_count"] == 3
+    assert item["success_count"] == 0
+    assert client.get("/api/videos?limit=501").status_code == 400
+    assert client.get("/api/videos?offset=-1").status_code == 400
 
 
 def test_vision_json_validation_accepts_fenced_json() -> None:

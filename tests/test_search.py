@@ -136,6 +136,8 @@ def test_subject_search_returns_correct_video(search_database: Database) -> None
     assert response.results[0]["video_id"] == "dragon-video"
     assert response.results[0]["timestamp"] == 10.0
     assert response.results[0]["video_url"] == "/media/videos/dragon-video.mp4"
+    assert response.results[0]["media_month"] != "unknown"
+    assert response.results[0]["media_month_label"].endswith("月")
 
 
 def test_action_synonym_finds_indexed_action(search_database: Database) -> None:
@@ -157,12 +159,72 @@ def test_ocr_is_searchable(search_database: Database) -> None:
 
 
 def test_structured_weights_rank_best_result_first(search_database: Database) -> None:
-    response = SearchService(search_database).search("龙舟鼓手击鼓的横屏镜头")
+    response = SearchService(search_database).search("龙舟")
     assert response.results[0]["timestamp"] == 10.0
     assert response.results[0]["score"] > response.results[1]["score"]
+
+
+def test_multiple_concepts_must_all_match_same_frame(
+    search_database: Database,
+) -> None:
+    response = SearchService(search_database).search("龙舟鼓手击鼓的横屏镜头")
+    assert len(response.results) == 1
+    assert response.results[0]["timestamp"] == 10.0
     assert {"subjects", "actions", "shot_type"}.issubset(
         response.results[0]["matched_fields"]
     )
+
+
+def test_vertical_drone_search_excludes_partial_keyword_matches(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "strong-search.db")
+    database.initialize()
+    add_video_with_results(
+        database,
+        video_id="strong-video",
+        video_name="strong-search.mp4",
+        results=[
+            (
+                0,
+                result_json(
+                    summary="竖屏无人机航拍运动场",
+                    subjects=["无人机", "运动场"],
+                    actions=["航拍"],
+                    scene=["户外"],
+                    shot_type=["竖屏", "全景"],
+                    ocr_text=[],
+                ),
+            ),
+            (
+                5_000,
+                result_json(
+                    summary="无人机横屏航拍运动场",
+                    subjects=["无人机"],
+                    actions=["航拍"],
+                    scene=["运动场"],
+                    shot_type=["横屏", "全景"],
+                    ocr_text=[],
+                ),
+            ),
+            (
+                10_000,
+                result_json(
+                    summary="竖屏采访画面",
+                    subjects=["受访者"],
+                    actions=["采访"],
+                    scene=["室内"],
+                    shot_type=["竖屏", "近景"],
+                    ocr_text=[],
+                ),
+            ),
+        ],
+    )
+
+    direct = SearchService(database).search("竖屏无人机")
+    synonym = SearchService(database).search("竖版航拍")
+    assert [result["timestamp"] for result in direct.results] == [0.0]
+    assert [result["timestamp"] for result in synonym.results] == [0.0]
 
 
 def test_empty_query_is_rejected(search_database: Database) -> None:

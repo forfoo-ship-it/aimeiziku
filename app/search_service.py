@@ -61,6 +61,24 @@ QUERY_STOP_TERMS = {
     "的竖",
 }
 
+QUERY_FILLER_TERMS = (
+    "帮我找到",
+    "请找到",
+    "找到",
+    "画面",
+    "镜头",
+    "素材",
+    "视频",
+    "出现",
+    "一个",
+    "中的",
+    "时的",
+    "里面",
+    "的",
+    "和",
+    "与",
+)
+
 
 class SearchValidationError(ValueError):
     """搜索参数无效。"""
@@ -117,6 +135,33 @@ def build_fts_query(terms: list[str]) -> str:
     return " OR ".join(f'"{term}"' for term in safe_terms)
 
 
+def build_query_constraints(
+    query: str,
+) -> tuple[list[set[str]], list[str]]:
+    normalized_query = normalize_text(query)
+    remaining = normalized_query
+    required_synonym_groups: list[set[str]] = []
+    for group in SYNONYM_GROUPS:
+        normalized_group = {normalize_text(word) for word in group}
+        matched_aliases = [
+            alias for alias in normalized_group if alias and alias in normalized_query
+        ]
+        if not matched_aliases:
+            continue
+        required_synonym_groups.append(normalized_group)
+        for alias in sorted(matched_aliases, key=len, reverse=True):
+            remaining = remaining.replace(alias, " ")
+
+    for filler in sorted(QUERY_FILLER_TERMS, key=len, reverse=True):
+        remaining = remaining.replace(normalize_text(filler), " ")
+    literal_runs = [
+        run
+        for run in re.findall(r"[\u3400-\u9fff]+|[a-z0-9_.-]+", remaining)
+        if len(run) >= 2
+    ]
+    return required_synonym_groups, _unique(literal_runs)
+
+
 class SearchService:
     def __init__(self, database: Database) -> None:
         self.database = database
@@ -132,6 +177,7 @@ class SearchService:
 
         started = time.perf_counter()
         terms = expand_query_terms(cleaned_query)
+        required_groups, literal_runs = build_query_constraints(cleaned_query)
         candidates = self.database.search_candidates(
             fts_query=build_fts_query(terms),
             like_terms=terms,
@@ -139,7 +185,15 @@ class SearchService:
         scored = [
             result
             for candidate in candidates
-            if (result := self._score_candidate(candidate, cleaned_query, terms))
+            if (
+                result := self._score_candidate(
+                    candidate,
+                    cleaned_query,
+                    terms,
+                    required_groups,
+                    literal_runs,
+                )
+            )
         ]
         scored.sort(
             key=lambda item: (
@@ -159,11 +213,17 @@ class SearchService:
         )
 
     def _score_candidate(
-        self, row: dict[str, Any], query: str, terms: list[str]
+        self,
+        row: dict[str, Any],
+        query: str,
+        terms: list[str],
+        required_groups: list[set[str]],
+        literal_runs: list[str],
     ) -> dict[str, Any] | None:
         normalized_query = normalize_text(query)
         matched: dict[str, list[str]] = {}
         matched_query_terms: set[str] = set()
+        normalized_fields: list[str] = []
         raw_score = 0.0
 
         for field, weight in FIELD_WEIGHTS.items():
@@ -171,6 +231,7 @@ class SearchService:
             normalized_field = normalize_text(field_text)
             if not normalized_field:
                 continue
+            normalized_fields.append(normalized_field)
             field_matches: list[str] = []
             field_score = 0.0
             raw_items = field_text.split()
@@ -198,10 +259,32 @@ class SearchService:
 
         if not matched:
             return None
+        if any(
+            not matched_query_terms.intersection(group)
+            for group in required_groups
+        ):
+            return None
+        if any(
+            not self._literal_run_is_covered(run, normalized_fields)
+            for run in literal_runs
+        ):
+            return None
 
         raw_score += min(16.0, len(matched_query_terms) * 2.0)
         score = min(100, max(1, round(raw_score)))
         result = json.loads(row["vision_result_json"])
+        media_created_at = str(row.get("media_created_at") or "")
+        month_match = re.match(r"^(\d{4})-(\d{2})", media_created_at)
+        media_month = (
+            f"{month_match.group(1)}-{month_match.group(2)}"
+            if month_match
+            else "unknown"
+        )
+        media_month_label = (
+            f"{month_match.group(1)}年{month_match.group(2)}月"
+            if month_match
+            else "日期待确认"
+        )
         matched_fields = [
             field for field in FIELD_WEIGHTS if field in matched
         ]
@@ -209,6 +292,10 @@ class SearchService:
             "video_id": row["video_id"],
             "video_name": row["video_name"],
             "video_url": f"/media/videos/{row['stored_name']}",
+            "media_created_at": media_created_at,
+            "media_month": media_month,
+            "media_month_label": media_month_label,
+            "index_status": row.get("index_status") or "indexed",
             "frame_id": int(row["frame_id"]),
             "timestamp": row["timestamp_ms"] / 1000,
             "timestamp_ms": int(row["timestamp_ms"]),
@@ -225,6 +312,22 @@ class SearchService:
             "matched_fields": matched_fields,
             "match_reason": self._match_reason(matched, matched_fields),
         }
+
+    @staticmethod
+    def _literal_run_is_covered(run: str, fields: list[str]) -> bool:
+        if any(run in field for field in fields):
+            return True
+        reachable = {0}
+        for start in range(len(run)):
+            if start not in reachable:
+                continue
+            for end in range(len(run), start + 1, -1):
+                piece = run[start:end]
+                if len(piece) < 2:
+                    continue
+                if any(piece in field for field in fields):
+                    reachable.add(end)
+        return len(run) in reachable
 
     @staticmethod
     def _match_reason(matched: dict[str, list[str]], fields: list[str]) -> str:

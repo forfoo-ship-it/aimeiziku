@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +14,15 @@ CREATE TABLE IF NOT EXISTS videos (
     original_name TEXT NOT NULL,
     stored_name TEXT NOT NULL UNIQUE,
     duration_ms INTEGER NOT NULL,
-    uploaded_at TEXT NOT NULL
+    uploaded_at TEXT NOT NULL,
+    media_created_at TEXT,
+    source_kind TEXT NOT NULL DEFAULT 'upload',
+    source_path TEXT,
+    source_size INTEGER,
+    source_mtime_ns INTEGER,
+    content_sha256 TEXT,
+    index_status TEXT NOT NULL DEFAULT 'pending_analysis',
+    index_error TEXT
 );
 
 CREATE TABLE IF NOT EXISTS frames (
@@ -36,7 +46,49 @@ CREATE TABLE IF NOT EXISTS frames (
 
 CREATE INDEX IF NOT EXISTS idx_frames_video_time
 ON frames(video_id, timestamp_ms);
+
+CREATE TABLE IF NOT EXISTS watch_folders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    path TEXT NOT NULL UNIQUE,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    auto_analyze INTEGER NOT NULL DEFAULT 0,
+    scan_interval_seconds INTEGER NOT NULL DEFAULT 60,
+    created_at TEXT NOT NULL,
+    last_scan_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS scan_jobs (
+    id TEXT PRIMARY KEY,
+    folder_id INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    auto_analyze INTEGER NOT NULL DEFAULT 0,
+    discovered INTEGER NOT NULL DEFAULT 0,
+    processed INTEGER NOT NULL DEFAULT 0,
+    imported INTEGER NOT NULL DEFAULT 0,
+    skipped INTEGER NOT NULL DEFAULT 0,
+    failed INTEGER NOT NULL DEFAULT 0,
+    current_file TEXT,
+    current_stage TEXT,
+    error TEXT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    FOREIGN KEY (folder_id) REFERENCES watch_folders(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_scan_jobs_folder_started
+ON scan_jobs(folder_id, started_at DESC);
 """
+
+VIDEO_COLUMNS = {
+    "media_created_at": "TEXT",
+    "source_kind": "TEXT NOT NULL DEFAULT 'upload'",
+    "source_path": "TEXT",
+    "source_size": "INTEGER",
+    "source_mtime_ns": "INTEGER",
+    "content_sha256": "TEXT",
+    "index_status": "TEXT NOT NULL DEFAULT 'pending_analysis'",
+    "index_error": "TEXT",
+}
 
 FRAME_VISION_COLUMNS = {
     "vision_status": "TEXT NOT NULL DEFAULT 'pending'",
@@ -99,6 +151,15 @@ class Database:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as connection:
             connection.executescript(SCHEMA)
+            video_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(videos)").fetchall()
+            }
+            for column_name, definition in VIDEO_COLUMNS.items():
+                if column_name not in video_columns:
+                    connection.execute(
+                        f"ALTER TABLE videos ADD COLUMN {column_name} {definition}"
+                    )
             existing_columns = {
                 row["name"]
                 for row in connection.execute("PRAGMA table_info(frames)").fetchall()
@@ -108,8 +169,54 @@ class Database:
                     connection.execute(
                         f"ALTER TABLE frames ADD COLUMN {column_name} {definition}"
                     )
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_videos_content_sha256
+                ON videos(content_sha256) WHERE content_sha256 IS NOT NULL
+                """
+            )
+            self._backfill_video_dates(connection)
+            connection.execute(
+                """
+                UPDATE scan_jobs
+                SET status = 'failed', error = '服务重启，扫描任务已中止',
+                    finished_at = COALESCE(finished_at, started_at)
+                WHERE status IN ('queued', 'running')
+                """
+            )
             self._initialize_search_table(connection)
             self._backfill_search_index(connection)
+            self._refresh_all_video_index_statuses(connection)
+
+    @staticmethod
+    def _backfill_video_dates(connection: sqlite3.Connection) -> None:
+        rows = connection.execute(
+            """
+            SELECT id, original_name, uploaded_at, media_created_at
+            FROM videos
+            """
+        ).fetchall()
+        pattern = re.compile(
+            r"(?<!\d)(20\d{2})[-_]?([01]\d)[-_]?([0-3]\d)"
+        )
+        for row in rows:
+            media_created_at = row["media_created_at"] or row["uploaded_at"]
+            match = pattern.search(row["original_name"])
+            if match:
+                try:
+                    media_created_at = datetime(
+                        int(match.group(1)),
+                        int(match.group(2)),
+                        int(match.group(3)),
+                        tzinfo=timezone.utc,
+                    ).isoformat()
+                except ValueError:
+                    pass
+            if media_created_at != row["media_created_at"]:
+                connection.execute(
+                    "UPDATE videos SET media_created_at = ? WHERE id = ?",
+                    (media_created_at, row["id"]),
+                )
 
     def _initialize_search_table(self, connection: sqlite3.Connection) -> None:
         existing = connection.execute(
@@ -145,14 +252,35 @@ class Database:
         duration_ms: int,
         uploaded_at: str,
         frames: list[tuple[int, str]],
+        media_created_at: str | None = None,
+        source_kind: str = "upload",
+        source_path: str | None = None,
+        source_size: int | None = None,
+        source_mtime_ns: int | None = None,
+        content_sha256: str | None = None,
     ) -> None:
         with self.connect() as connection:
             connection.execute(
                 """
-                INSERT INTO videos (id, original_name, stored_name, duration_ms, uploaded_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO videos (
+                    id, original_name, stored_name, duration_ms, uploaded_at,
+                    media_created_at, source_kind, source_path, source_size,
+                    source_mtime_ns, content_sha256, index_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_analysis')
                 """,
-                (video_id, original_name, stored_name, duration_ms, uploaded_at),
+                (
+                    video_id,
+                    original_name,
+                    stored_name,
+                    duration_ms,
+                    uploaded_at,
+                    media_created_at or uploaded_at,
+                    source_kind,
+                    source_path,
+                    source_size,
+                    source_mtime_ns,
+                    content_sha256,
+                ),
             )
             connection.executemany(
                 """
@@ -161,6 +289,61 @@ class Database:
                 """,
                 [(video_id, timestamp_ms, image_name) for timestamp_ms, image_name in frames],
             )
+
+    def find_video_by_source(
+        self, source_path: str, source_size: int, source_mtime_ns: int
+    ) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM videos
+                WHERE source_path = ? AND source_size = ? AND source_mtime_ns = ?
+                LIMIT 1
+                """,
+                (source_path, source_size, source_mtime_ns),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def find_video_by_hash(self, content_sha256: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM videos WHERE content_sha256 = ? LIMIT 1",
+                (content_sha256,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def count_videos(self) -> int:
+        with self.connect() as connection:
+            row = connection.execute("SELECT COUNT(*) AS total FROM videos").fetchone()
+        return int(row["total"])
+
+    def list_videos(self, limit: int = 200, offset: int = 0) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    videos.*,
+                    COUNT(frames.id) AS frame_count,
+                    COALESCE(SUM(CASE WHEN frames.vision_status = 'success' THEN 1 ELSE 0 END), 0) AS success_count,
+                    COALESCE(SUM(CASE WHEN frames.vision_status = 'failed' THEN 1 ELSE 0 END), 0) AS failed_count,
+                    COALESCE(SUM(CASE WHEN frames.vision_status = 'processing' THEN 1 ELSE 0 END), 0) AS processing_count,
+                    COALESCE(SUM(CASE WHEN frames.vision_status = 'pending' THEN 1 ELSE 0 END), 0) AS pending_count,
+                    (
+                        SELECT first_frame.image_name
+                        FROM frames AS first_frame
+                        WHERE first_frame.video_id = videos.id
+                        ORDER BY first_frame.timestamp_ms
+                        LIMIT 1
+                    ) AS first_frame_image_name
+                FROM videos
+                LEFT JOIN frames ON frames.video_id = videos.id
+                GROUP BY videos.id
+                ORDER BY videos.media_created_at DESC, videos.uploaded_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                (limit, offset),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def get_video(self, video_id: str) -> dict[str, Any] | None:
         with self.connect() as connection:
@@ -186,6 +369,58 @@ class Database:
                 "SELECT id FROM videos ORDER BY uploaded_at DESC LIMIT 1"
             ).fetchone()
         return self.get_video(row["id"]) if row else None
+
+    def set_video_index_status(
+        self, video_id: str, status: str, error: str | None = None
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE videos SET index_status = ?, index_error = ? WHERE id = ?",
+                (status, error[:1000] if error else None, video_id),
+            )
+
+    def _refresh_video_index_status(
+        self, connection: sqlite3.Connection, video_id: str
+    ) -> None:
+        counts = connection.execute(
+            """
+            SELECT COUNT(*) AS total,
+                   SUM(vision_status = 'success') AS success,
+                   SUM(vision_status = 'failed') AS failed,
+                   SUM(vision_status = 'processing') AS processing,
+                   SUM(vision_status = 'pending') AS pending
+            FROM frames WHERE video_id = ?
+            """,
+            (video_id,),
+        ).fetchone()
+        total = int(counts["total"] or 0)
+        success = int(counts["success"] or 0)
+        failed = int(counts["failed"] or 0)
+        processing = int(counts["processing"] or 0)
+        pending = int(counts["pending"] or 0)
+        if total and success == total:
+            index_status = "indexed"
+        elif processing:
+            index_status = "analyzing"
+        elif pending:
+            index_status = "pending_analysis"
+        elif failed and success:
+            index_status = "partial"
+        elif failed:
+            index_status = "failed"
+        else:
+            index_status = "pending_analysis"
+        connection.execute(
+            "UPDATE videos SET index_status = ?, index_error = NULL WHERE id = ?",
+            (index_status, video_id),
+        )
+
+    def _refresh_all_video_index_statuses(
+        self, connection: sqlite3.Connection
+    ) -> None:
+        video_ids = connection.execute("SELECT id FROM videos").fetchall()
+        for row in video_ids:
+            self._refresh_video_index_status(connection, row["id"])
 
     def reset_vision(self, video_id: str, *, force: bool) -> bool:
         with self.connect() as connection:
@@ -228,6 +463,7 @@ class Database:
                     """,
                     (video_id,),
                 )
+            self._refresh_video_index_status(connection, video_id)
         return True
 
     def claim_next_vision_frame(self, video_id: str) -> dict[str, Any] | None:
@@ -248,6 +484,10 @@ class Database:
                 "UPDATE frames SET vision_status = 'processing' WHERE id = ?",
                 (frame["id"],),
             )
+            connection.execute(
+                "UPDATE videos SET index_status = 'analyzing', index_error = NULL WHERE id = ?",
+                (video_id,),
+            )
         claimed = dict(frame)
         claimed["vision_status"] = "processing"
         return claimed
@@ -266,6 +506,9 @@ class Database:
         total_tokens: int | None,
     ) -> None:
         with self.connect() as connection:
+            video_row = connection.execute(
+                "SELECT video_id FROM frames WHERE id = ?", (frame_id,)
+            ).fetchone()
             connection.execute(
                 """
                 UPDATE frames
@@ -297,6 +540,8 @@ class Database:
                 self._upsert_search_frame(connection, frame_id)
             except (sqlite3.Error, json.JSONDecodeError, KeyError, TypeError):
                 pass
+            if video_row:
+                self._refresh_video_index_status(connection, video_row["video_id"])
 
     def save_vision_failure(
         self,
@@ -309,6 +554,9 @@ class Database:
         raw_text: str | None = None,
     ) -> None:
         with self.connect() as connection:
+            video_row = connection.execute(
+                "SELECT video_id FROM frames WHERE id = ?", (frame_id,)
+            ).fetchone()
             connection.execute(
                 """
                 UPDATE frames
@@ -322,6 +570,8 @@ class Database:
                 """,
                 (model, analyzed_at, raw_text, error[:1000], duration_ms, frame_id),
             )
+            if video_row:
+                self._refresh_video_index_status(connection, video_row["video_id"])
 
     def _backfill_search_index(self, connection: sqlite3.Connection) -> None:
         frame_ids = connection.execute(
@@ -435,7 +685,8 @@ class Database:
                    fs.video_id, fs.video_name, fs.summary, fs.subjects,
                    fs.actions, fs.scene, fs.shot_type, fs.ocr_text,
                    fs.time_text, fs.search_text, f.timestamp_ms, f.image_name,
-                   f.vision_result_json, v.stored_name
+                   f.vision_result_json, v.stored_name, v.media_created_at,
+                   v.index_status
             FROM frame_search fs
             JOIN frames f ON f.id = CAST(fs.frame_id AS INTEGER)
             JOIN videos v ON v.id = fs.video_id
@@ -471,6 +722,138 @@ class Database:
                 ).fetchall()
                 found.update({int(row["frame_id"]): dict(row) for row in rows})
         return list(found.values())
+
+    def upsert_watch_folder(
+        self,
+        *,
+        path: str,
+        auto_analyze: bool,
+        scan_interval_seconds: int,
+        created_at: str,
+    ) -> dict[str, Any]:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO watch_folders (
+                    path, enabled, auto_analyze, scan_interval_seconds, created_at
+                ) VALUES (?, 1, ?, ?, ?)
+                ON CONFLICT(path) DO UPDATE SET
+                    enabled = 1,
+                    auto_analyze = excluded.auto_analyze,
+                    scan_interval_seconds = excluded.scan_interval_seconds
+                """,
+                (path, int(auto_analyze), scan_interval_seconds, created_at),
+            )
+            row = connection.execute(
+                "SELECT * FROM watch_folders WHERE path = ?", (path,)
+            ).fetchone()
+        return dict(row)
+
+    def get_watch_folder(self, folder_id: int) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM watch_folders WHERE id = ?", (folder_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_watch_folders(self, *, enabled_only: bool = False) -> list[dict[str, Any]]:
+        condition = "WHERE wf.enabled = 1" if enabled_only else ""
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT wf.*,
+                       sj.id AS latest_job_id,
+                       sj.status AS latest_job_status,
+                       sj.discovered, sj.processed, sj.imported,
+                       sj.skipped, sj.failed, sj.current_file,
+                       sj.current_stage, sj.error AS job_error,
+                       sj.started_at, sj.finished_at
+                FROM watch_folders wf
+                LEFT JOIN scan_jobs sj ON sj.id = (
+                    SELECT id FROM scan_jobs
+                    WHERE folder_id = wf.id
+                    ORDER BY started_at DESC LIMIT 1
+                )
+                {condition}
+                ORDER BY wf.created_at DESC
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def mark_watch_folder_scanned(self, folder_id: int, scanned_at: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE watch_folders SET last_scan_at = ? WHERE id = ?",
+                (scanned_at, folder_id),
+            )
+
+    def delete_watch_folder(self, folder_id: int) -> bool:
+        with self.connect() as connection:
+            deleted = connection.execute(
+                "DELETE FROM watch_folders WHERE id = ?", (folder_id,)
+            ).rowcount
+        return bool(deleted)
+
+    def get_active_scan_job(self, folder_id: int) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM scan_jobs
+                WHERE folder_id = ? AND status IN ('queued', 'running')
+                ORDER BY started_at DESC LIMIT 1
+                """,
+                (folder_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def create_scan_job(
+        self,
+        *,
+        job_id: str,
+        folder_id: int,
+        auto_analyze: bool,
+        started_at: str,
+    ) -> dict[str, Any]:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO scan_jobs (
+                    id, folder_id, status, auto_analyze, started_at
+                ) VALUES (?, ?, 'queued', ?, ?)
+                """,
+                (job_id, folder_id, int(auto_analyze), started_at),
+            )
+        return self.get_scan_job(job_id)
+
+    def get_scan_job(self, job_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM scan_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def update_scan_job(self, job_id: str, **changes: Any) -> None:
+        allowed = {
+            "status",
+            "discovered",
+            "processed",
+            "imported",
+            "skipped",
+            "failed",
+            "current_file",
+            "current_stage",
+            "error",
+            "finished_at",
+        }
+        updates = {key: value for key, value in changes.items() if key in allowed}
+        if not updates:
+            return
+        assignments = ", ".join(f"{column} = ?" for column in updates)
+        parameters = [*updates.values(), job_id]
+        with self.connect() as connection:
+            connection.execute(
+                f"UPDATE scan_jobs SET {assignments} WHERE id = ?", parameters
+            )
 
     def delete_video(self, video_id: str) -> bool:
         with self.connect() as connection:

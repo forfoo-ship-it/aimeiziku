@@ -3,16 +3,16 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>县媒智搜 · 声画智能检索系统</title>
+    <title>AI媒资库 · 视频素材智能检索系统</title>
     <link rel="stylesheet" href="/static/styles.css">
   </head>
   <body>
     <header class="topbar">
       <div>
-        <p class="eyebrow">县级融媒体声画智能检索系统</p>
-        <h1>县媒智搜</h1>
+        <p class="eyebrow">视频素材智能检索系统</p>
+        <h1>AI媒资库</h1>
       </div>
-      <span class="phase-badge">第三阶段 · 画面检索</span>
+      <span class="phase-badge">智能画面检索</span>
     </header>
 
     <main>
@@ -37,6 +37,75 @@
           </div>
         </form>
         <div id="search-status" class="status" role="status" aria-live="polite"></div>
+        <div class="admin-entry">
+          <span>需要导入、监测或识别新素材？</span>
+          <button id="admin-entry-button" type="button" aria-expanded="false" aria-controls="admin-console">
+            进入素材管理后台
+          </button>
+        </div>
+      </section>
+
+      <section id="admin-console" class="admin-console" hidden aria-labelledby="admin-console-title">
+        <div class="admin-console-heading">
+          <div>
+            <p class="panel-kicker">仅在管理素材时使用</p>
+            <h2 id="admin-console-title">素材管理后台</h2>
+            <p>管理视频目录、历史素材和AI画面索引。</p>
+          </div>
+          <button id="admin-close-button" type="button">返回画面检索</button>
+        </div>
+
+      <section class="folder-panel" aria-labelledby="folder-title">
+        <div class="folder-heading">
+          <div>
+            <p class="panel-kicker">本地素材自动入库</p>
+            <h2 id="folder-title">监测视频文件夹</h2>
+            <p>递归发现 MP4；已导入或已建立索引的视频会自动跳过。</p>
+          </div>
+          <form id="folder-form" class="folder-form">
+            <input id="folder-path" type="text" maxlength="2000" required
+              placeholder="例如：D:\县融媒素材\2026">
+            <select id="folder-interval" aria-label="自动扫描间隔">
+              <option value="30">每30秒</option>
+              <option value="60" selected>每1分钟</option>
+              <option value="300">每5分钟</option>
+              <option value="900">每15分钟</option>
+            </select>
+            <label class="auto-analyze-option">
+              <input id="folder-auto-analyze" type="checkbox">
+              <span>自动进行AI画面识别（会产生API费用）</span>
+            </label>
+            <button id="folder-add-button" type="submit">添加并扫描</button>
+          </form>
+        </div>
+        <div id="folder-status" class="status" role="status" aria-live="polite"></div>
+        <div class="folder-content">
+          <div>
+            <h3>监测进度</h3>
+            <div id="watch-folders-list" class="watch-folders-list"></div>
+          </div>
+          <div class="video-library-section">
+            <div class="video-library-heading">
+              <div>
+                <h3>全部视频素材</h3>
+                <p id="video-library-count">正在读取视频……</p>
+              </div>
+              <div class="video-selection-actions" aria-label="视频多选操作">
+                <button id="select-all-videos" class="library-tool-button" type="button">全选</button>
+                <button id="select-pending-videos" class="library-tool-button" type="button">只选未识别</button>
+                <button id="clear-video-selection" class="library-tool-button" type="button">清空选择</button>
+                <span id="selected-video-count">已选 0 个</span>
+                <button id="batch-analyze-button" type="button" disabled>识别所选</button>
+                <button id="batch-reanalyze-button" class="secondary-button" type="button" disabled>重新分析所选</button>
+              </div>
+            </div>
+            <div id="batch-vision-status" class="status" role="status" aria-live="polite"></div>
+            <div id="batch-vision-progress" class="batch-vision-progress" hidden>
+              <span id="batch-vision-progress-bar"></span>
+            </div>
+            <div id="video-library-list" class="video-library-grid"></div>
+          </div>
+        </div>
       </section>
 
       <section class="upload-panel" aria-labelledby="upload-title">
@@ -66,6 +135,7 @@
         </div>
         <div id="vision-status" class="status" role="status" aria-live="polite"></div>
       </section>
+      </section>
 
       <section id="workspace" class="workspace" aria-label="视频关键帧工作区">
         <aside class="frames-panel">
@@ -85,7 +155,10 @@
               <p class="panel-kicker">历史素材原片</p>
               <h2 id="video-title">等待导入视频</h2>
             </div>
-            <span id="duration" class="duration">--:--</span>
+            <div class="player-heading-meta">
+              <span id="video-index-status" class="index-status-badge pending_analysis">待识别</span>
+              <span id="duration" class="duration">--:--</span>
+            </div>
           </div>
           <div class="player-shell">
             <video id="video-player" controls preload="metadata"></video>
