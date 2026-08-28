@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>县媒智搜 · 声画智能检索系统</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">县级融媒体声画智能检索系统</p>
+        <h1>县媒智搜</h1>
+      </div>
+      <span class="phase-badge">第一阶段 · 关键帧索引</span>
+    </header>
+
+    <main>
+      <section class="upload-panel" aria-labelledby="upload-title">
+        <div>
+          <h2 id="upload-title">导入历史视频</h2>
+          <p>上传 MP4 后，系统会每隔 5 秒提取一张画面并记录时间点。</p>
+        </div>
+        <form id="upload-form">
+          <label class="file-picker" for="video-file">
+            <span id="file-label">选择 MP4 视频</span>
+            <input id="video-file" name="file" type="file" accept="video/mp4,.mp4" required>
+          </label>
+          <button id="upload-button" type="submit">上传并建立索引</button>
+        </form>
+        <div id="upload-status" class="status" role="status" aria-live="polite"></div>
+      </section>
+
+      <section id="workspace" class="workspace" aria-label="视频关键帧工作区">
+        <aside class="frames-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="panel-kicker">时间点索引</p>
+              <h2>关键帧</h2>
+            </div>
+            <span id="frame-count" class="count">0 张</span>
+          </div>
+          <div id="frames-list" class="frames-list"></div>
+        </aside>
+
+        <section class="player-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="panel-kicker">历史素材原片</p>
+              <h2 id="video-title">等待导入视频</h2>
+            </div>
+            <span id="duration" class="duration">--:--</span>
+          </div>
+          <div class="player-shell">
+            <video id="video-player" controls preload="metadata"></video>
+            <div id="empty-state" class="empty-state">
+              <div class="empty-icon" aria-hidden="true">▶</div>
+              <strong>这里将显示原视频</strong>
+              <span>导入 MP4 后，可从左侧关键帧快速定位。</span>
+            </div>
+          </div>
+          <div class="playback-info">
+            <span>当前定位</span>
+            <strong id="current-position">00:00.000</strong>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <script>window.__INITIAL_VIDEO__ = {{ initial_video | tojson }};</script>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>

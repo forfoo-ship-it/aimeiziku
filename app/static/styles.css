@@ -1,0 +1,127 @@
+:root {
+  color-scheme: light;
+  --ink: #18211d;
+  --muted: #647169;
+  --line: #d9e0db;
+  --paper: #f5f7f4;
+  --surface: #ffffff;
+  --forest: #174b38;
+  --forest-dark: #0f3527;
+  --mint: #dcebe3;
+  --gold: #c59035;
+  --danger: #a23b36;
+  --shadow: 0 18px 45px rgba(25, 52, 40, 0.09);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  color: var(--ink);
+  background:
+    radial-gradient(circle at 15% 0%, rgba(197, 144, 53, 0.08), transparent 28rem),
+    var(--paper);
+  font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+}
+
+button, input { font: inherit; }
+
+.topbar {
+  min-height: 96px;
+  padding: 22px clamp(20px, 4vw, 64px);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  color: white;
+  background: linear-gradient(120deg, var(--forest-dark), var(--forest));
+  border-bottom: 3px solid var(--gold);
+}
+
+.topbar h1, .topbar p, .upload-panel h2, .upload-panel p, .panel-heading h2, .panel-heading p { margin: 0; }
+.topbar h1 { margin-top: 2px; font-size: clamp(26px, 3vw, 38px); letter-spacing: 0.08em; }
+.eyebrow { color: #c8d8cf; font-size: 13px; letter-spacing: 0.12em; }
+.phase-badge { padding: 8px 13px; border: 1px solid rgba(255,255,255,.25); border-radius: 999px; color: #e9f1ec; font-size: 13px; white-space: nowrap; }
+
+main { width: min(1500px, calc(100% - 40px)); margin: 28px auto 48px; }
+
+.upload-panel {
+  padding: 20px 24px;
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) auto;
+  gap: 18px 32px;
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+}
+
+.upload-panel h2 { font-size: 19px; }
+.upload-panel p { margin-top: 6px; color: var(--muted); font-size: 14px; }
+#upload-form { display: flex; gap: 10px; align-items: center; }
+.file-picker { max-width: 320px; padding: 11px 16px; overflow: hidden; color: var(--forest); background: var(--mint); border: 1px solid #c2d7ca; border-radius: 8px; cursor: pointer; white-space: nowrap; text-overflow: ellipsis; }
+.file-picker input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+#upload-button { padding: 12px 18px; color: white; background: var(--forest); border: 0; border-radius: 8px; cursor: pointer; font-weight: 700; }
+#upload-button:hover { background: var(--forest-dark); }
+#upload-button:disabled { opacity: .55; cursor: wait; }
+.status { grid-column: 1 / -1; min-height: 0; font-size: 14px; }
+.status:not(:empty) { min-height: 22px; padding-top: 4px; border-top: 1px solid var(--line); }
+.status.working { color: #8b681e; }
+.status.success { color: var(--forest); }
+.status.error { color: var(--danger); }
+
+.workspace {
+  margin-top: 22px;
+  min-height: 640px;
+  display: grid;
+  grid-template-columns: minmax(280px, 370px) minmax(0, 1fr);
+  gap: 22px;
+}
+
+.frames-panel, .player-panel { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); overflow: hidden; }
+.frames-panel { display: flex; flex-direction: column; min-height: 0; }
+.player-panel { padding-bottom: 16px; }
+.panel-heading { min-height: 76px; padding: 16px 20px; display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--line); }
+.panel-kicker { color: var(--muted); font-size: 11px; letter-spacing: .12em; }
+.panel-heading h2 { margin-top: 3px; max-width: 620px; overflow: hidden; font-size: 18px; text-overflow: ellipsis; white-space: nowrap; }
+.count, .duration { color: var(--forest); font-size: 13px; font-variant-numeric: tabular-nums; }
+
+.frames-list { flex: 1; max-height: 720px; padding: 14px; overflow-y: auto; }
+.frames-list:empty::after { content: "上传视频后，关键帧将按时间顺序显示在这里。"; min-height: 500px; display: grid; place-items: center; padding: 40px; color: var(--muted); text-align: center; line-height: 1.8; }
+.frame-card { width: 100%; margin: 0 0 12px; padding: 0; display: block; overflow: hidden; text-align: left; background: #f8faf8; border: 1px solid var(--line); border-radius: 10px; cursor: pointer; transition: transform .16s ease, border-color .16s ease, box-shadow .16s ease; }
+.frame-card:hover { transform: translateY(-2px); border-color: #9cb8a7; box-shadow: 0 8px 20px rgba(23,75,56,.12); }
+.frame-card.active { border-color: var(--gold); box-shadow: 0 0 0 2px rgba(197,144,53,.18); }
+.frame-card img { width: 100%; aspect-ratio: 16 / 9; display: block; object-fit: cover; background: #dfe4e1; }
+.frame-meta { padding: 10px 12px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.frame-number { color: var(--muted); font-size: 12px; }
+.frame-meta strong { color: var(--forest); font-size: 14px; font-variant-numeric: tabular-nums; }
+
+.player-shell { position: relative; margin: 22px; aspect-ratio: 16 / 9; display: grid; place-items: center; overflow: hidden; background: #101512; border-radius: 10px; }
+#video-player { width: 100%; height: 100%; object-fit: contain; }
+#video-player[hidden], .empty-state[hidden] { display: none; }
+.empty-state { display: flex; flex-direction: column; align-items: center; gap: 9px; color: #cbd5cf; text-align: center; }
+.empty-state span { color: #8e9b94; font-size: 13px; }
+.empty-icon { width: 52px; height: 52px; display: grid; place-items: center; color: var(--forest-dark); background: var(--gold); border-radius: 50%; padding-left: 3px; }
+.playback-info { margin: 0 22px; padding: 12px 15px; display: flex; align-items: center; justify-content: space-between; color: var(--muted); background: #f4f7f5; border-radius: 8px; font-size: 13px; }
+.playback-info strong { color: var(--forest); font-variant-numeric: tabular-nums; }
+
+@media (max-width: 900px) {
+  .upload-panel { grid-template-columns: 1fr; }
+  #upload-form { flex-wrap: wrap; }
+  .workspace { grid-template-columns: 1fr; }
+  .frames-panel { max-height: 540px; }
+  .frames-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+  .frame-card { margin: 0; }
+}
+
+@media (max-width: 560px) {
+  .topbar { align-items: flex-start; flex-direction: column; }
+  main { width: min(100% - 24px, 1500px); margin-top: 14px; }
+  .upload-panel { padding: 18px; }
+  #upload-form, .file-picker, #upload-button { width: 100%; max-width: none; }
+  .player-shell { margin: 12px; }
+}
+

@@ -1,0 +1,44 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+.envrc
+*.key
+*.pem
+.secrets/
+secrets/
+credentials*.json
+
+# Python environments and caches
+.tools/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+__pycache__/
+*.py[cod]
+.coverage
+htmlcov/
+
+# Runtime data
+data/media.db
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+data/*.log
+data/*.mp4
+data/uploads/*
+!data/uploads/.gitkeep
+data/frames/*
+!data/frames/.gitkeep
+
+# Local installers and logs
+python-*.exe
+python-*.zip
+python-install*.log
+get-pip.py
+ffmpeg-*.zip
