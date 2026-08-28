@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import shutil
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -16,6 +17,7 @@ from pydantic import BaseModel
 
 from app.config import VisionConfigurationError, VisionSettings
 from app.database import Database
+from app.search_service import SearchService, SearchValidationError
 from app.video_service import VideoProcessingError, extract_frames
 from app.vision_provider import DeepSeekVisionProvider, VisionProvider
 from app.vision_service import VisionAnalysisService
@@ -53,7 +55,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     yield
 
 
-app = FastAPI(title="县媒智搜", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="县媒智搜", version="0.3.0", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "app" / "static"), name="static")
 app.mount("/media/videos", StaticFiles(directory=UPLOAD_DIR), name="videos")
 app.mount("/media/frames", StaticFiles(directory=FRAME_DIR), name="frames")
@@ -127,6 +129,23 @@ async def latest_video() -> dict:
     if video is None:
         raise HTTPException(status_code=404, detail="尚未上传视频。")
     return video
+
+
+@app.get("/api/search")
+async def search_frames(q: str = "", limit: int = 20) -> dict:
+    try:
+        response = SearchService(database).search(q, limit=limit)
+    except SearchValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (sqlite3.Error, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=500, detail="搜索索引暂时不可用。") from exc
+    return {
+        "query": response.query,
+        "count": response.count,
+        "elapsed_ms": response.elapsed_ms,
+        "backend": response.backend,
+        "results": response.results,
+    }
 
 
 @app.get("/api/videos/{video_id}")

@@ -15,9 +15,18 @@ const visionButton = document.querySelector("#vision-button");
 const reanalyzeButton = document.querySelector("#reanalyze-button");
 const visionProgress = document.querySelector("#vision-progress");
 const visionStatus = document.querySelector("#vision-status");
+const searchForm = document.querySelector("#search-form");
+const searchInput = document.querySelector("#search-input");
+const searchButton = document.querySelector("#search-button");
+const clearSearchButton = document.querySelector("#clear-search-button");
+const searchStatus = document.querySelector("#search-status");
+const searchExamples = document.querySelectorAll("[data-search-example]");
+const listKicker = document.querySelector("#list-kicker");
+const listTitle = document.querySelector("#list-title");
 
 let currentVideo = null;
 let analysisRunning = false;
+let searchRunning = false;
 
 function formatTime(seconds, milliseconds = false) {
   const safeSeconds = Math.max(0, Number(seconds) || 0);
@@ -37,10 +46,35 @@ function setStatus(element, message, type = "") {
 }
 
 function selectFrame(card, timestampSeconds) {
-  document.querySelectorAll(".frame-card.active").forEach((item) => item.classList.remove("active"));
+  document.querySelectorAll(".frame-card.active, .search-result.active").forEach((item) => item.classList.remove("active"));
   card.classList.add("active");
   player.currentTime = timestampSeconds;
   player.play().catch(() => {});
+}
+
+function renderPlayer(video) {
+  if (!video) return;
+  currentVideo = video;
+  videoTitle.textContent = video.original_name;
+  durationLabel.textContent = formatTime(video.duration_seconds);
+  if (player.getAttribute("src") !== video.video_url) {
+    player.src = video.video_url;
+  }
+  player.hidden = false;
+  emptyState.hidden = true;
+  renderVisionControls(video);
+}
+
+function playAt(timestampSeconds) {
+  const seekAndPlay = () => {
+    player.currentTime = Number(timestampSeconds) || 0;
+    player.play().catch(() => {});
+  };
+  if (player.readyState >= 1) {
+    seekAndPlay();
+  } else {
+    player.addEventListener("loadedmetadata", seekAndPlay, { once: true });
+  }
 }
 
 function appendVisionField(container, label, values) {
@@ -108,15 +142,10 @@ function renderVisionControls(video) {
 
 function renderVideo(video) {
   if (!video) return;
-  currentVideo = video;
-  videoTitle.textContent = video.original_name;
-  durationLabel.textContent = formatTime(video.duration_seconds);
+  listKicker.textContent = "时间点索引";
+  listTitle.textContent = "关键帧";
   frameCount.textContent = `${video.frames.length} 张`;
-  if (player.getAttribute("src") !== video.video_url) {
-    player.src = video.video_url;
-  }
-  player.hidden = false;
-  emptyState.hidden = true;
+  renderPlayer(video);
   framesList.replaceChildren();
 
   video.frames.forEach((frame, index) => {
@@ -138,6 +167,141 @@ function renderVideo(video) {
     framesList.append(card);
   });
   renderVisionControls(video);
+}
+
+const searchFieldLabels = {
+  subjects: "主体",
+  actions: "动作",
+  scene: "场景",
+  shot_type: "镜头",
+  ocr_text: "OCR",
+  summary: "摘要",
+  video_name: "文件名",
+  time_text: "时间点",
+};
+
+function appendSearchField(container, label, values) {
+  if (!Array.isArray(values) || values.length === 0) return;
+  const row = document.createElement("p");
+  row.className = "search-result-field";
+  const name = document.createElement("span");
+  name.textContent = `${label}：`;
+  row.append(name, document.createTextNode(values.join("、")));
+  container.append(row);
+}
+
+async function openSearchResult(card, result) {
+  document.querySelectorAll(".search-result.active").forEach((item) => item.classList.remove("active"));
+  card.classList.add("active");
+  setStatus(searchStatus, `正在载入 ${result.video_name} 的 ${formatTime(result.timestamp, true)}…`, "working");
+  try {
+    const video = await requestJson(`/api/videos/${encodeURIComponent(result.video_id)}`);
+    renderPlayer(video);
+    playAt(result.timestamp);
+    setStatus(searchStatus, `已定位到 ${result.video_name} · ${formatTime(result.timestamp, true)}`, "success");
+  } catch (error) {
+    setStatus(searchStatus, error.message || "视频载入失败，请重试。", "error");
+  }
+}
+
+function renderSearchResults(response) {
+  listKicker.textContent = `检索“${response.query}”`;
+  listTitle.textContent = "搜索结果";
+  frameCount.textContent = `${response.count} 条`;
+  framesList.replaceChildren();
+
+  if (response.results.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "search-empty";
+    const title = document.createElement("strong");
+    title.textContent = "没有找到相关画面";
+    const hint = document.createElement("span");
+    hint.textContent = "可尝试更短的关键词，或先对视频完成 AI 画面识别。";
+    empty.append(title, hint);
+    framesList.append(empty);
+    return;
+  }
+
+  response.results.forEach((result) => {
+    const card = document.createElement("article");
+    card.className = "search-result";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "search-result-button";
+    button.setAttribute("aria-label", `播放 ${result.video_name} ${formatTime(result.timestamp, true)} 的画面`);
+
+    const image = document.createElement("img");
+    image.src = result.thumbnail_url;
+    image.alt = `${result.video_name} ${formatTime(result.timestamp, true)} 的关键帧`;
+    image.loading = "lazy";
+
+    const body = document.createElement("div");
+    body.className = "search-result-body";
+    const meta = document.createElement("div");
+    meta.className = "search-result-meta";
+    const source = document.createElement("span");
+    source.textContent = `${result.video_name} · ${formatTime(result.timestamp, true)}`;
+    const score = document.createElement("strong");
+    score.textContent = `相关度 ${result.score}`;
+    meta.append(source, score);
+
+    const summary = document.createElement("p");
+    summary.className = "search-result-summary";
+    summary.textContent = result.summary || "该画面暂无摘要";
+
+    const tags = document.createElement("div");
+    tags.className = "search-match-tags";
+    result.matched_fields.forEach((field) => {
+      const tag = document.createElement("span");
+      tag.textContent = searchFieldLabels[field] || field;
+      tags.append(tag);
+    });
+
+    const details = document.createElement("div");
+    details.className = "search-result-details";
+    appendSearchField(details, "主体", result.subjects);
+    appendSearchField(details, "动作", result.actions);
+    appendSearchField(details, "场景", result.scene);
+    appendSearchField(details, "镜头", result.shot_type);
+    appendSearchField(details, "OCR", result.ocr_text);
+
+    const reason = document.createElement("p");
+    reason.className = "search-match-reason";
+    reason.textContent = result.match_reason;
+    body.append(meta, summary, tags, details, reason);
+    button.append(image, body);
+    button.addEventListener("click", () => openSearchResult(card, result));
+    card.append(button);
+    framesList.append(card);
+  });
+}
+
+async function runSearch() {
+  if (searchRunning) return;
+  const query = searchInput.value.trim();
+  if (query.length < 2) {
+    setStatus(searchStatus, "请输入至少 2 个字符。", "error");
+    searchInput.focus();
+    return;
+  }
+
+  searchRunning = true;
+  searchButton.disabled = true;
+  searchButton.textContent = "搜索中…";
+  setStatus(searchStatus, "正在检索已保存的 AI 画面索引…", "working");
+  try {
+    const response = await requestJson(`/api/search?q=${encodeURIComponent(query)}&limit=20`);
+    renderSearchResults(response);
+    clearSearchButton.hidden = false;
+    const backend = response.backend === "fts5" ? "全文索引" : "兼容检索";
+    setStatus(searchStatus, `找到 ${response.count} 条结果 · ${response.elapsed_ms}ms · ${backend}`, "success");
+  } catch (error) {
+    setStatus(searchStatus, error.message || "搜索失败，请重试。", "error");
+  } finally {
+    searchRunning = false;
+    searchButton.disabled = false;
+    searchButton.textContent = "搜索画面";
+  }
 }
 
 async function requestJson(url, options) {
@@ -202,6 +366,9 @@ form.addEventListener("submit", async (event) => {
     const body = new FormData();
     body.append("file", file);
     const result = await requestJson("/api/videos", { method: "POST", body });
+    searchInput.value = "";
+    clearSearchButton.hidden = true;
+    setStatus(searchStatus, "");
     renderVideo(result);
     setStatus(uploadStatus, `索引完成：已提取 ${result.frames.length} 张关键帧。`, "success");
   } catch (error) {
@@ -210,6 +377,24 @@ form.addEventListener("submit", async (event) => {
     uploadButton.disabled = false;
     fileInput.disabled = false;
   }
+});
+
+searchForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  runSearch();
+});
+searchExamples.forEach((button) => {
+  button.addEventListener("click", () => {
+    searchInput.value = button.dataset.searchExample;
+    runSearch();
+  });
+});
+clearSearchButton.addEventListener("click", () => {
+  searchInput.value = "";
+  clearSearchButton.hidden = true;
+  setStatus(searchStatus, "");
+  if (currentVideo) renderVideo(currentVideo);
+  searchInput.focus();
 });
 
 visionButton.addEventListener("click", () => runVisionAnalysis(false));
@@ -223,4 +408,3 @@ player.addEventListener("timeupdate", () => {
 });
 
 renderVideo(window.__INITIAL_VIDEO__);
-

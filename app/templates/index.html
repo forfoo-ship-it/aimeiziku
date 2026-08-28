@@ -12,10 +12,33 @@
         <p class="eyebrow">县级融媒体声画智能检索系统</p>
         <h1>县媒智搜</h1>
       </div>
-      <span class="phase-badge">第二阶段 · 画面理解</span>
+      <span class="phase-badge">第三阶段 · 画面检索</span>
     </header>
 
     <main>
+      <section class="search-panel" aria-labelledby="search-title">
+        <div class="search-copy">
+          <p class="panel-kicker">已识别画面索引</p>
+          <h2 id="search-title">描述你想找的画面</h2>
+          <p>例如：找到龙舟冲刺时鼓手击鼓的横屏镜头</p>
+        </div>
+        <form id="search-form" class="search-form" role="search">
+          <div class="search-input-row">
+            <input id="search-input" name="q" type="search" minlength="2" maxlength="200"
+              autocomplete="off" placeholder="输入人物、动作、场景、镜头类型或画面文字">
+            <button id="search-button" type="submit">搜索画面</button>
+            <button id="clear-search-button" class="secondary-button" type="button" hidden>清空</button>
+          </div>
+          <div class="search-examples" aria-label="搜索示例">
+            <span>试试：</span>
+            <button type="button" data-search-example="龙舟鼓手击鼓的横屏镜头">龙舟鼓手击鼓的横屏镜头</button>
+            <button type="button" data-search-example="中南门古城夜景航拍">中南门古城夜景航拍</button>
+            <button type="button" data-search-example="阳戏演员表演的近景">阳戏演员表演的近景</button>
+          </div>
+        </form>
+        <div id="search-status" class="status" role="status" aria-live="polite"></div>
+      </section>
+
       <section class="upload-panel" aria-labelledby="upload-title">
         <div>
           <h2 id="upload-title">导入历史视频</h2>
@@ -48,8 +71,8 @@
         <aside class="frames-panel">
           <div class="panel-heading">
             <div>
-              <p class="panel-kicker">时间点索引</p>
-              <h2>关键帧</h2>
+              <p id="list-kicker" class="panel-kicker">时间点索引</p>
+              <h2 id="list-title">关键帧</h2>
             </div>
             <span id="frame-count" class="count">0 张</span>
           </div>
