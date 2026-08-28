@@ -1,19 +1,24 @@
 from __future__ import annotations
 
+import json
 import shutil
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncIterator, Callable
 from uuid import uuid4
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile, status
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
 
+from app.config import VisionConfigurationError, VisionSettings
 from app.database import Database
 from app.video_service import VideoProcessingError, extract_frames
+from app.vision_provider import DeepSeekVisionProvider, VisionProvider
+from app.vision_service import VisionAnalysisService
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -26,6 +31,18 @@ COPY_CHUNK_BYTES = 1024 * 1024
 
 database = Database(DATABASE_PATH)
 templates = Jinja2Templates(directory=BASE_DIR / "app" / "templates")
+
+
+def create_vision_provider() -> VisionProvider:
+    settings = VisionSettings.from_environment(BASE_DIR / ".env")
+    return DeepSeekVisionProvider(settings)
+
+
+vision_provider_factory: Callable[[], VisionProvider] = create_vision_provider
+
+
+class VisionStartRequest(BaseModel):
+    force: bool = False
 
 
 @asynccontextmanager
@@ -47,6 +64,33 @@ def serialize_video(record: dict | None) -> dict | None:
         return None
     video = record["video"]
     video_id = video["id"]
+    serialized_frames = []
+    for frame in record["frames"]:
+        vision_result = None
+        if frame.get("vision_result_json"):
+            try:
+                vision_result = json.loads(frame["vision_result_json"])
+            except json.JSONDecodeError:
+                vision_result = None
+        serialized_frames.append(
+            {
+                "timestamp_ms": frame["timestamp_ms"],
+                "timestamp_seconds": frame["timestamp_ms"] / 1000,
+                "image_url": f"/media/frames/{video_id}/{frame['image_name']}",
+                "vision_status": frame.get("vision_status") or "pending",
+                "vision_model": frame.get("vision_model"),
+                "vision_analyzed_at": frame.get("vision_analyzed_at"),
+                "vision_result": vision_result,
+                "vision_error": frame.get("vision_error"),
+                "vision_duration_ms": frame.get("vision_duration_ms"),
+                "vision_input_tokens": frame.get("vision_input_tokens"),
+                "vision_output_tokens": frame.get("vision_output_tokens"),
+                "vision_total_tokens": frame.get("vision_total_tokens"),
+            }
+        )
+
+    statuses = [frame["vision_status"] for frame in serialized_frames]
+    completed = sum(status in {"success", "failed"} for status in statuses)
     return {
         "id": video_id,
         "original_name": video["original_name"],
@@ -54,14 +98,16 @@ def serialize_video(record: dict | None) -> dict | None:
         "duration_seconds": video["duration_ms"] / 1000,
         "uploaded_at": video["uploaded_at"],
         "video_url": f"/media/videos/{video['stored_name']}",
-        "frames": [
-            {
-                "timestamp_ms": frame["timestamp_ms"],
-                "timestamp_seconds": frame["timestamp_ms"] / 1000,
-                "image_url": f"/media/frames/{video_id}/{frame['image_name']}",
-            }
-            for frame in record["frames"]
-        ],
+        "frames": serialized_frames,
+        "vision_progress": {
+            "total": len(serialized_frames),
+            "completed": completed,
+            "success": statuses.count("success"),
+            "failed": statuses.count("failed"),
+            "processing": statuses.count("processing"),
+            "pending": statuses.count("pending"),
+            "done": bool(serialized_frames) and completed == len(serialized_frames),
+        },
     }
 
 
@@ -89,6 +135,42 @@ async def get_video(video_id: str) -> dict:
     if video is None:
         raise HTTPException(status_code=404, detail="未找到该视频。")
     return video
+
+
+@app.post("/api/videos/{video_id}/vision/start")
+async def start_vision_analysis(video_id: str, request: VisionStartRequest) -> dict:
+    if database.get_video(video_id) is None:
+        raise HTTPException(status_code=404, detail="未找到该视频。")
+    try:
+        vision_provider_factory()
+    except VisionConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    database.reset_vision(video_id, force=request.force)
+    return serialize_video(database.get_video(video_id))
+
+
+@app.post("/api/videos/{video_id}/vision/next")
+async def analyze_next_frame(video_id: str) -> dict:
+    if database.get_video(video_id) is None:
+        raise HTTPException(status_code=404, detail="未找到该视频。")
+    try:
+        provider = vision_provider_factory()
+    except VisionConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    service = VisionAnalysisService(
+        database=database,
+        frame_root=FRAME_DIR,
+        provider=provider,
+    )
+    processed = await service.process_next(video_id)
+    video = serialize_video(database.get_video(video_id))
+    return {
+        "processed": processed,
+        "done": video["vision_progress"]["done"],
+        "video": video,
+    }
 
 
 @app.post("/api/videos", status_code=status.HTTP_201_CREATED)

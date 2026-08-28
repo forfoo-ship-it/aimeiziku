@@ -12,7 +12,7 @@
         <p class="eyebrow">县级融媒体声画智能检索系统</p>
         <h1>县媒智搜</h1>
       </div>
-      <span class="phase-badge">第一阶段 · 关键帧索引</span>
+      <span class="phase-badge">第二阶段 · 画面理解</span>
     </header>
 
     <main>
@@ -29,6 +29,19 @@
           <button id="upload-button" type="submit">上传并建立索引</button>
         </form>
         <div id="upload-status" class="status" role="status" aria-live="polite"></div>
+      </section>
+
+      <section id="vision-panel" class="vision-panel" hidden aria-labelledby="vision-title">
+        <div>
+          <p class="panel-kicker">关键帧画面理解</p>
+          <h2 id="vision-title">AI 识别画面</h2>
+          <p id="vision-progress">等待开始识别</p>
+        </div>
+        <div class="vision-actions">
+          <button id="vision-button" type="button">AI识别画面</button>
+          <button id="reanalyze-button" class="secondary-button" type="button" hidden>重新分析</button>
+        </div>
+        <div id="vision-status" class="status" role="status" aria-live="polite"></div>
       </section>
 
       <section id="workspace" class="workspace" aria-label="视频关键帧工作区">

@@ -64,14 +64,34 @@ main { width: min(1500px, calc(100% - 40px)); margin: 28px auto 48px; }
 #upload-form { display: flex; gap: 10px; align-items: center; }
 .file-picker { max-width: 320px; padding: 11px 16px; overflow: hidden; color: var(--forest); background: var(--mint); border: 1px solid #c2d7ca; border-radius: 8px; cursor: pointer; white-space: nowrap; text-overflow: ellipsis; }
 .file-picker input { position: absolute; width: 1px; height: 1px; opacity: 0; }
-#upload-button { padding: 12px 18px; color: white; background: var(--forest); border: 0; border-radius: 8px; cursor: pointer; font-weight: 700; }
-#upload-button:hover { background: var(--forest-dark); }
-#upload-button:disabled { opacity: .55; cursor: wait; }
+#upload-button, #vision-button { padding: 12px 18px; color: white; background: var(--forest); border: 0; border-radius: 8px; cursor: pointer; font-weight: 700; }
+#upload-button:hover, #vision-button:hover { background: var(--forest-dark); }
+#upload-button:disabled, #vision-button:disabled, .secondary-button:disabled { opacity: .55; cursor: wait; }
 .status { grid-column: 1 / -1; min-height: 0; font-size: 14px; }
 .status:not(:empty) { min-height: 22px; padding-top: 4px; border-top: 1px solid var(--line); }
 .status.working { color: #8b681e; }
 .status.success { color: var(--forest); }
 .status.error { color: var(--danger); }
+
+.vision-panel {
+  margin-top: 16px;
+  padding: 18px 24px;
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) auto;
+  gap: 12px 28px;
+  align-items: center;
+  background: #edf4ef;
+  border: 1px solid #c9d9cf;
+  border-radius: 14px;
+}
+.vision-panel[hidden] { display: none; }
+.vision-panel h2, .vision-panel p { margin: 0; }
+.vision-panel h2 { margin-top: 3px; font-size: 18px; }
+#vision-progress { margin-top: 6px; color: var(--muted); font-size: 13px; }
+.vision-actions { display: flex; gap: 9px; }
+.secondary-button { padding: 11px 16px; color: var(--forest); background: white; border: 1px solid #9fbaa9; border-radius: 8px; cursor: pointer; }
+.secondary-button:hover { background: #f6faf7; }
+.vision-panel .status { grid-column: 1 / -1; }
 
 .workspace {
   margin-top: 22px;
@@ -91,13 +111,27 @@ main { width: min(1500px, calc(100% - 40px)); margin: 28px auto 48px; }
 
 .frames-list { flex: 1; max-height: 720px; padding: 14px; overflow-y: auto; }
 .frames-list:empty::after { content: "上传视频后，关键帧将按时间顺序显示在这里。"; min-height: 500px; display: grid; place-items: center; padding: 40px; color: var(--muted); text-align: center; line-height: 1.8; }
-.frame-card { width: 100%; margin: 0 0 12px; padding: 0; display: block; overflow: hidden; text-align: left; background: #f8faf8; border: 1px solid var(--line); border-radius: 10px; cursor: pointer; transition: transform .16s ease, border-color .16s ease, box-shadow .16s ease; }
+.frame-card { width: 100%; margin: 0 0 12px; padding: 0; display: block; overflow: hidden; text-align: left; background: #f8faf8; border: 1px solid var(--line); border-radius: 10px; transition: transform .16s ease, border-color .16s ease, box-shadow .16s ease; }
 .frame-card:hover { transform: translateY(-2px); border-color: #9cb8a7; box-shadow: 0 8px 20px rgba(23,75,56,.12); }
 .frame-card.active { border-color: var(--gold); box-shadow: 0 0 0 2px rgba(197,144,53,.18); }
-.frame-card img { width: 100%; aspect-ratio: 16 / 9; display: block; object-fit: cover; background: #dfe4e1; }
+.frame-seek { width: 100%; padding: 0; display: block; color: inherit; text-align: left; background: transparent; border: 0; cursor: pointer; }
+.frame-seek:focus-visible { outline: 3px solid rgba(197,144,53,.45); outline-offset: -3px; }
+.frame-seek img { width: 100%; aspect-ratio: 16 / 9; display: block; object-fit: cover; background: #dfe4e1; }
 .frame-meta { padding: 10px 12px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .frame-number { color: var(--muted); font-size: 12px; }
 .frame-meta strong { color: var(--forest); font-size: 14px; font-variant-numeric: tabular-nums; }
+
+.vision-result { padding: 0 12px 12px; border-top: 1px solid #e1e7e3; }
+.vision-status-badge { margin-top: 10px; padding: 3px 8px; display: inline-block; color: #536159; background: #e7ece9; border-radius: 999px; font-size: 11px; }
+.vision-result.success .vision-status-badge { color: var(--forest); background: var(--mint); }
+.vision-result.failed .vision-status-badge { color: var(--danger); background: #f6e5e3; }
+.vision-result.processing .vision-status-badge { color: #86631b; background: #f7edd7; }
+.vision-summary { margin: 9px 0; color: var(--ink); font-size: 13px; line-height: 1.65; }
+.vision-field { margin-top: 6px; display: grid; grid-template-columns: 38px 1fr; gap: 7px; font-size: 12px; line-height: 1.5; }
+.vision-field span { color: var(--muted); }
+.vision-field p { margin: 0; color: #344039; }
+.vision-meta { margin: 9px 0 0; color: #7a867f; font-size: 11px; }
+.vision-error { margin: 8px 0 0; color: var(--danger); font-size: 12px; line-height: 1.5; word-break: break-word; }
 
 .player-shell { position: relative; margin: 22px; aspect-ratio: 16 / 9; display: grid; place-items: center; overflow: hidden; background: #101512; border-radius: 10px; }
 #video-player { width: 100%; height: 100%; object-fit: contain; }
@@ -110,6 +144,8 @@ main { width: min(1500px, calc(100% - 40px)); margin: 28px auto 48px; }
 
 @media (max-width: 900px) {
   .upload-panel { grid-template-columns: 1fr; }
+  .vision-panel { grid-template-columns: 1fr; }
+  .vision-panel .status { grid-column: 1; }
   #upload-form { flex-wrap: wrap; }
   .workspace { grid-template-columns: 1fr; }
   .frames-panel { max-height: 540px; }
@@ -121,7 +157,6 @@ main { width: min(1500px, calc(100% - 40px)); margin: 28px auto 48px; }
   .topbar { align-items: flex-start; flex-direction: column; }
   main { width: min(100% - 24px, 1500px); margin-top: 14px; }
   .upload-panel { padding: 18px; }
-  #upload-form, .file-picker, #upload-button { width: 100%; max-width: none; }
+  #upload-form, .file-picker, #upload-button, .vision-actions, #vision-button, .secondary-button { width: 100%; max-width: none; }
   .player-shell { margin: 12px; }
 }
-
