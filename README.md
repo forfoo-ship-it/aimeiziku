@@ -1,8 +1,8 @@
 # AI媒资库——视频素材智能检索系统
 
-面向县级融媒体中心编辑的历史素材检索系统。当前已完成视频关键帧索引、AI 画面理解，以及基于 SQLite 画面索引的自然语言检索。
+面向各级融媒体中心编辑的历史素材检索系统。当前已完成视频关键帧索引、AI 画面理解，以及基于 SQLite 画面索引的自然语言检索。
 
-## 参赛提交信息
+## 项目信息
 
 - **公开代码仓库：** <https://github.com/forfoo-ship-it/aimeiziku>
 - **Windows 安装包：** [下载 AI媒资库 Guikesong 参赛版](https://github.com/forfoo-ship-it/aimeiziku/releases/download/Guikesong/AI-Media-Library-Windows-Guikesong.zip)
@@ -123,10 +123,6 @@ DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_VISION_MODEL=deepseek-v4-flash-vision-exp
 ```
 
-`.env` 已被 Git 忽略，API Key 只在后端读取。请勿将真实密钥写入源码、测试或聊天内容。
-
-> 注意：截至 2026-08-28，DeepSeek 官方公开文档尚未列出上述实验视觉模型，且公开 API 文档未声明支持图片输入。真实调用能否成功取决于账号是否具备该实验模型权限。
-
 ## 环境
 
 - Git 2.53.0.windows.3
@@ -181,4 +177,3 @@ python -m venv .venv
 
 推荐将服务部署在融媒体中心内网服务器，挂载单位已有素材目录或共享存储。当前版本通过独立 `VisionProvider` 调用视觉模型；正式落地时可替换为内网本地视觉大模型，对历史素材执行首次全量建库，并持续增量索引新增视频。该演进方案不改变编辑端的浏览器使用方式。
 
-当前代码未实现 NAS 专用同步协议、登录权限或公网多租户能力。公网评审以公开源码和 GitHub Release 安装包为交付方式。
