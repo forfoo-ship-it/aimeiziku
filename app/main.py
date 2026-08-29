@@ -1,20 +1,26 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
+import os
 import sqlite3
 import shutil
+import subprocess
+import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from ipaddress import ip_address
 from pathlib import Path
-from typing import AsyncIterator, Callable
+from typing import Annotated, AsyncIterator, Callable
 from uuid import uuid4
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile, status
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 from app.config import VisionConfigurationError, VisionSettings
 from app.database import Database
@@ -25,7 +31,12 @@ from app.folder_scan_service import (
 )
 from app.search_service import SearchService, SearchValidationError
 from app.video_service import VideoProcessingError, extract_frames
-from app.vision_provider import DeepSeekVisionProvider, VisionProvider
+from app.vision_provider import (
+    DeepSeekVisionProvider,
+    VisionProvider,
+    VisionResult,
+    VisionSearchAliases,
+)
 from app.vision_service import VisionAnalysisService
 
 
@@ -36,6 +47,9 @@ FRAME_DIR = DATA_DIR / "frames"
 DATABASE_PATH = DATA_DIR / "media.db"
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
 COPY_CHUNK_BYTES = 1024 * 1024
+MANAGED_UPLOADS_FOLDER_KEY = "managed-uploads"
+WATCH_ROOT_KEY_PREFIX = "watch-"
+UNASSIGNED_ROOT_KEY = "unassigned-folders"
 
 database = Database(DATABASE_PATH)
 templates = Jinja2Templates(directory=BASE_DIR / "app" / "templates")
@@ -52,6 +66,31 @@ folder_scan_service: FolderScanService | None = None
 
 class VisionStartRequest(BaseModel):
     force: bool = False
+
+
+VisionEditText = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=300)
+]
+VisionEditSummary = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)
+]
+
+
+class VisionResultEditRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    summary: VisionEditSummary
+    subjects: list[VisionEditText] = Field(default_factory=list, max_length=50)
+    actions: list[VisionEditText] = Field(default_factory=list, max_length=50)
+    scene: list[VisionEditText] = Field(default_factory=list, max_length=50)
+    shot_type: list[VisionEditText] = Field(default_factory=list, max_length=50)
+    ocr_text: list[VisionEditText] = Field(default_factory=list, max_length=50)
+    confidence: float = Field(ge=0, le=1)
+
+    @field_validator("subjects", "actions", "scene", "shot_type", "ocr_text")
+    @classmethod
+    def remove_duplicate_values(cls, values: list[str]) -> list[str]:
+        return list(dict.fromkeys(values))
 
 
 class WatchFolderRequest(BaseModel):
@@ -131,12 +170,21 @@ def serialize_video(record: dict | None) -> dict | None:
                 vision_result = None
         serialized_frames.append(
             {
+                "id": frame["id"],
                 "timestamp_ms": frame["timestamp_ms"],
                 "timestamp_seconds": frame["timestamp_ms"] / 1000,
                 "image_url": f"/media/frames/{video_id}/{frame['image_name']}",
                 "vision_status": frame.get("vision_status") or "pending",
+                "duplicate_of_timestamp_ms": frame.get("duplicate_of_timestamp_ms"),
+                "duplicate_of_timestamp_seconds": (
+                    frame["duplicate_of_timestamp_ms"] / 1000
+                    if frame.get("duplicate_of_timestamp_ms") is not None
+                    else None
+                ),
+                "similarity_score": frame.get("similarity_score"),
                 "vision_model": frame.get("vision_model"),
                 "vision_analyzed_at": frame.get("vision_analyzed_at"),
+                "vision_edited_at": frame.get("vision_edited_at"),
                 "vision_result": vision_result,
                 "vision_error": frame.get("vision_error"),
                 "vision_duration_ms": frame.get("vision_duration_ms"),
@@ -146,7 +194,14 @@ def serialize_video(record: dict | None) -> dict | None:
             }
         )
 
-    statuses = [frame["vision_status"] for frame in serialized_frames]
+    statuses = [
+        frame["vision_status"]
+        for frame in serialized_frames
+        if frame["vision_status"] != "duplicate"
+    ]
+    duplicate_count = sum(
+        frame["vision_status"] == "duplicate" for frame in serialized_frames
+    )
     completed = sum(status in {"success", "failed"} for status in statuses)
     return {
         "id": video_id,
@@ -161,13 +216,14 @@ def serialize_video(record: dict | None) -> dict | None:
         "video_url": f"/media/videos/{video['stored_name']}",
         "frames": serialized_frames,
         "vision_progress": {
-            "total": len(serialized_frames),
+            "total": len(statuses),
             "completed": completed,
             "success": statuses.count("success"),
             "failed": statuses.count("failed"),
             "processing": statuses.count("processing"),
             "pending": statuses.count("pending"),
-            "done": bool(serialized_frames) and completed == len(serialized_frames),
+            "duplicate": duplicate_count,
+            "done": bool(statuses) and completed == len(statuses),
         },
     }
 
@@ -193,6 +249,137 @@ def video_thumbnail_url(video: dict) -> str | None:
     return f"/media/frames/{video['id']}/{image_name}"
 
 
+def encode_source_folder(source_folder: str) -> str:
+    encoded = base64.urlsafe_b64encode(source_folder.encode("utf-8")).decode("ascii")
+    return f"path-{encoded.rstrip('=')}"
+
+
+def decode_source_folder(folder_key: str) -> str:
+    if not folder_key.startswith("path-"):
+        raise ValueError("invalid folder key")
+    encoded = folder_key[5:]
+    padding = "=" * (-len(encoded) % 4)
+    try:
+        source_folder = base64.urlsafe_b64decode(encoded + padding).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError) as exc:
+        raise ValueError("invalid folder key") from exc
+    if not source_folder or len(source_folder) > 4000:
+        raise ValueError("invalid folder key")
+    return source_folder
+
+
+def source_folder_name(source_folder: str) -> str:
+    normalized = source_folder.replace("\\", "/").rstrip("/")
+    return normalized.rsplit("/", 1)[-1] or source_folder
+
+
+def folder_is_within(source_folder: str, root_folder: str) -> bool:
+    try:
+        normalized_source = os.path.normcase(os.path.abspath(source_folder))
+        normalized_root = os.path.normcase(os.path.abspath(root_folder))
+        return os.path.commonpath((normalized_source, normalized_root)) == normalized_root
+    except (OSError, ValueError):
+        return False
+
+
+def watch_root_name(root_folder: str) -> str:
+    normalized = root_folder.replace("\\", "/").rstrip("/")
+    if len(normalized) == 2 and normalized[1] == ":":
+        return f"{normalized[0].upper()}盘"
+    return normalized.rsplit("/", 1)[-1] or root_folder
+
+
+def matching_watch_root_id(
+    source_folder: str,
+    watch_folders: list[dict],
+) -> int | None:
+    matches = [
+        folder
+        for folder in watch_folders
+        if folder_is_within(source_folder, str(folder["path"]))
+    ]
+    if not matches:
+        return None
+    most_specific = max(
+        matches,
+        key=lambda folder: len(os.path.normcase(os.path.abspath(str(folder["path"])))),
+    )
+    return int(most_specific["id"])
+
+
+def serialize_source_folder(row: dict) -> dict:
+    source_folder = row.get("source_folder")
+    managed_uploads = source_folder is None
+    return {
+        "folder_key": (
+            MANAGED_UPLOADS_FOLDER_KEY
+            if managed_uploads
+            else encode_source_folder(source_folder)
+        ),
+        "name": (
+            "历史视频上传"
+            if managed_uploads
+            else source_folder_name(source_folder)
+        ),
+        "path": str(UPLOAD_DIR.resolve()) if managed_uploads else source_folder,
+        "managed_uploads": managed_uploads,
+        "video_count": int(row.get("video_count") or 0),
+        "indexed_count": int(row.get("indexed_count") or 0),
+        "pending_count": int(row.get("pending_count") or 0),
+        "latest_media_created_at": row.get("latest_media_created_at"),
+    }
+
+
+def request_may_open_server_file(request: Request) -> bool:
+    host = request.url.hostname or ""
+    client_host = request.client.host if request.client else ""
+
+    def is_loopback(value: str) -> bool:
+        if value.lower() == "localhost":
+            return True
+        try:
+            return ip_address(value).is_loopback
+        except ValueError:
+            return False
+
+    return is_loopback(host) and is_loopback(client_host)
+
+
+def resolve_video_file(record: dict) -> tuple[Path, str]:
+    video = record["video"]
+    source_path = video.get("source_path")
+    if source_path:
+        source = Path(source_path)
+        if source.is_file():
+            return source.resolve(strict=True), "source"
+
+    upload_root = UPLOAD_DIR.resolve()
+    managed_copy = (UPLOAD_DIR / video["stored_name"]).resolve(strict=True)
+    if not managed_copy.is_relative_to(upload_root):
+        raise OSError("视频路径超出受控素材目录。")
+    return managed_copy, "managed_copy"
+
+
+def open_file_in_manager(path: Path) -> None:
+    if sys.platform == "win32":
+        explorer = shutil.which("explorer.exe") or "explorer.exe"
+        command = [explorer, f"/select,{path}"]
+    elif sys.platform == "darwin":
+        command = ["open", "-R", str(path)]
+    else:
+        if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+            raise OSError("服务器没有图形桌面，无法打开文件管理器。")
+        opener = shutil.which("xdg-open")
+        if not opener:
+            raise OSError("服务器未安装 xdg-open，无法打开文件管理器。")
+        command = [opener, str(path.parent)]
+    subprocess.Popen(
+        command,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
 def require_folder_scan_service() -> FolderScanService:
     if folder_scan_service is None:
         raise HTTPException(status_code=503, detail="文件夹监测服务尚未启动。")
@@ -201,11 +388,10 @@ def require_folder_scan_service() -> FolderScanService:
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request) -> HTMLResponse:
-    latest = serialize_video(database.get_latest_video())
     return templates.TemplateResponse(
         request=request,
         name="index.html",
-        context={"initial_video": latest},
+        context={"initial_video": None},
     )
 
 
@@ -217,14 +403,161 @@ async def latest_video() -> dict:
     return video
 
 
+@app.get("/api/video-roots")
+async def list_video_roots() -> dict:
+    watch_folders = database.list_watch_folders()
+    folder_rows = database.list_video_folders()
+    roots: list[dict] = []
+
+    managed_row = next(
+        (row for row in folder_rows if row.get("source_folder") is None),
+        None,
+    )
+    if managed_row:
+        roots.append(
+            {
+                "root_key": MANAGED_UPLOADS_FOLDER_KEY,
+                "name": "历史视频上传",
+                "path": str(UPLOAD_DIR.resolve()),
+                "managed_uploads": True,
+                "direct_videos": True,
+                "folder_count": 1,
+                "video_count": int(managed_row.get("video_count") or 0),
+                "indexed_count": int(managed_row.get("indexed_count") or 0),
+                "pending_count": int(managed_row.get("pending_count") or 0),
+            }
+        )
+
+    for watch_folder in watch_folders:
+        watch_id = int(watch_folder["id"])
+        rows = [
+            row
+            for row in folder_rows
+            if row.get("source_folder")
+            and matching_watch_root_id(str(row["source_folder"]), watch_folders)
+            == watch_id
+        ]
+        roots.append(
+            {
+                "root_key": f"{WATCH_ROOT_KEY_PREFIX}{watch_id}",
+                "name": watch_root_name(str(watch_folder["path"])),
+                "path": watch_folder["path"],
+                "managed_uploads": False,
+                "direct_videos": False,
+                "folder_count": len(rows),
+                "video_count": sum(int(row.get("video_count") or 0) for row in rows),
+                "indexed_count": sum(
+                    int(row.get("indexed_count") or 0) for row in rows
+                ),
+                "pending_count": sum(
+                    int(row.get("pending_count") or 0) for row in rows
+                ),
+            }
+        )
+
+    unassigned_rows = [
+        row
+        for row in folder_rows
+        if row.get("source_folder")
+        and matching_watch_root_id(str(row["source_folder"]), watch_folders) is None
+    ]
+    if unassigned_rows:
+        roots.append(
+            {
+                "root_key": UNASSIGNED_ROOT_KEY,
+                "name": "其他已入库目录",
+                "path": "不在当前监测配置中的历史目录",
+                "managed_uploads": False,
+                "direct_videos": False,
+                "folder_count": len(unassigned_rows),
+                "video_count": sum(
+                    int(row.get("video_count") or 0) for row in unassigned_rows
+                ),
+                "indexed_count": sum(
+                    int(row.get("indexed_count") or 0) for row in unassigned_rows
+                ),
+                "pending_count": sum(
+                    int(row.get("pending_count") or 0) for row in unassigned_rows
+                ),
+            }
+        )
+    return {"count": len(roots), "roots": roots}
+
+
+@app.get("/api/video-folders")
+async def list_video_folders(root_key: str | None = None) -> dict:
+    folder_rows = database.list_video_folders()
+    watch_folders = database.list_watch_folders()
+
+    if root_key is None:
+        selected_rows = folder_rows
+    elif root_key == MANAGED_UPLOADS_FOLDER_KEY:
+        selected_rows = [
+            row for row in folder_rows if row.get("source_folder") is None
+        ]
+    elif root_key == UNASSIGNED_ROOT_KEY:
+        selected_rows = [
+            row
+            for row in folder_rows
+            if row.get("source_folder")
+            and matching_watch_root_id(str(row["source_folder"]), watch_folders)
+            is None
+        ]
+    elif root_key.startswith(WATCH_ROOT_KEY_PREFIX):
+        try:
+            watch_id = int(root_key.removeprefix(WATCH_ROOT_KEY_PREFIX))
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400, detail="监测目录标识无效。"
+            ) from exc
+        if database.get_watch_folder(watch_id) is None:
+            raise HTTPException(status_code=400, detail="监测目录不存在。")
+        selected_rows = [
+            row
+            for row in folder_rows
+            if row.get("source_folder")
+            and matching_watch_root_id(str(row["source_folder"]), watch_folders)
+            == watch_id
+        ]
+    else:
+        raise HTTPException(status_code=400, detail="监测目录标识无效。")
+
+    folders = [serialize_source_folder(row) for row in selected_rows]
+    return {"count": len(folders), "root_key": root_key, "folders": folders}
+
+
 @app.get("/api/videos")
-async def list_videos(limit: int = 200, offset: int = 0) -> dict:
+async def list_videos(
+    limit: int = 200,
+    offset: int = 0,
+    folder_key: str | None = None,
+) -> dict:
     if limit < 1 or limit > 500:
         raise HTTPException(status_code=400, detail="limit 必须在 1 至 500 之间。")
     if offset < 0:
         raise HTTPException(status_code=400, detail="offset 不能小于 0。")
-    videos = database.list_videos(limit=limit, offset=offset)
-    total = database.count_videos()
+    source_folder = None
+    managed_uploads_only = False
+    if folder_key == MANAGED_UPLOADS_FOLDER_KEY:
+        managed_uploads_only = True
+    elif folder_key:
+        try:
+            source_folder = decode_source_folder(folder_key)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail="素材文件夹标识无效。",
+            ) from exc
+    videos = database.list_videos(
+        limit=limit,
+        offset=offset,
+        source_folder=source_folder,
+        managed_uploads_only=managed_uploads_only,
+    )
+    total = database.count_videos(
+        source_folder=source_folder,
+        managed_uploads_only=managed_uploads_only,
+    )
     return {
         "count": len(videos),
         "total": total,
@@ -237,6 +570,7 @@ async def list_videos(limit: int = 200, offset: int = 0) -> dict:
                 "media_created_at": video.get("media_created_at")
                 or video["uploaded_at"],
                 "source_kind": video.get("source_kind") or "upload",
+                "source_folder": video.get("source_folder"),
                 "index_status": video.get("index_status") or "pending_analysis",
                 "index_error": video.get("index_error"),
                 "thumbnail_url": video_thumbnail_url(video),
@@ -245,6 +579,11 @@ async def list_videos(limit: int = 200, offset: int = 0) -> dict:
                 "failed_count": int(video.get("failed_count") or 0),
                 "processing_count": int(video.get("processing_count") or 0),
                 "pending_count": int(video.get("pending_count") or 0),
+                "duplicate_count": int(video.get("duplicate_count") or 0),
+                "analysis_frame_count": (
+                    int(video.get("frame_count") or 0)
+                    - int(video.get("duplicate_count") or 0)
+                ),
             }
             for video in videos
         ],
@@ -374,6 +713,85 @@ async def get_video(video_id: str) -> dict:
     return video
 
 
+@app.put("/api/videos/{video_id}/frames/{frame_id}/vision")
+async def update_frame_vision_result(
+    video_id: str,
+    frame_id: int,
+    request: VisionResultEditRequest,
+) -> dict:
+    record = database.get_video(video_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="未找到该视频。")
+    frame = next(
+        (item for item in record["frames"] if int(item["id"]) == frame_id),
+        None,
+    )
+    if frame is None:
+        raise HTTPException(status_code=404, detail="未找到该关键帧。")
+    if frame.get("vision_status") != "success":
+        raise HTTPException(
+            status_code=409,
+            detail="只有已成功识别的关键帧才能人工修改。",
+        )
+
+    corrected = VisionResult(
+        summary=request.summary,
+        subjects=request.subjects,
+        actions=request.actions,
+        scene=request.scene,
+        shot_type=request.shot_type,
+        ocr_text=request.ocr_text,
+        search_aliases=VisionSearchAliases(),
+        confidence=request.confidence,
+    )
+    try:
+        updated = database.update_vision_result(
+            video_id=video_id,
+            frame_id=frame_id,
+            result_json=corrected.model_dump_json(),
+            edited_at=datetime.now(timezone.utc).isoformat(),
+        )
+    except (sqlite3.Error, json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="识别信息保存失败，原有内容未被修改。",
+        ) from exc
+    if not updated:
+        raise HTTPException(
+            status_code=409,
+            detail="该关键帧当前不能修改，请刷新后重试。",
+        )
+    return serialize_video(database.get_video(video_id))
+
+
+@app.post("/api/videos/{video_id}/open-location")
+async def open_video_location(video_id: str, request: Request) -> dict:
+    if not request_may_open_server_file(request):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "只有在服务器本机通过 localhost 或 127.0.0.1 访问时，"
+                "才能打开资源管理器。内网其他电脑需要使用共享素材路径。"
+            ),
+        )
+    record = database.get_video(video_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="未找到该视频。")
+    try:
+        path, location_kind = resolve_video_file(record)
+        open_file_in_manager(path)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"无法打开视频所在位置：{exc}",
+        ) from exc
+    return {
+        "opened": True,
+        "video_name": record["video"]["original_name"],
+        "location_kind": location_kind,
+    }
+
+
 @app.post("/api/videos/{video_id}/vision/start")
 async def start_vision_analysis(video_id: str, request: VisionStartRequest) -> dict:
     if database.get_video(video_id) is None:
@@ -410,6 +828,41 @@ async def analyze_next_frame(video_id: str) -> dict:
     }
 
 
+@app.post("/api/videos/{video_id}/frames/{frame_id}/vision/analyze")
+async def analyze_duplicate_frame(video_id: str, frame_id: int) -> dict:
+    record = database.get_video(video_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="未找到该视频。")
+    frame = next(
+        (item for item in record["frames"] if int(item["id"]) == frame_id),
+        None,
+    )
+    if frame is None:
+        raise HTTPException(status_code=404, detail="未找到该关键帧。")
+    if frame.get("vision_status") != "duplicate":
+        raise HTTPException(
+            status_code=409,
+            detail="只有已跳过的相似关键帧可以使用此操作。",
+        )
+    try:
+        provider = vision_provider_factory()
+    except VisionConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    service = VisionAnalysisService(
+        database=database,
+        frame_root=FRAME_DIR,
+        provider=provider,
+    )
+    processed = await service.process_duplicate(video_id, frame_id)
+    if not processed:
+        raise HTTPException(
+            status_code=409,
+            detail="该关键帧状态已经变化，请刷新后重试。",
+        )
+    return serialize_video(database.get_video(video_id))
+
+
 @app.post("/api/videos", status_code=status.HTTP_201_CREATED)
 async def upload_video(file: UploadFile = File(...)) -> dict:
     original_name = Path(file.filename or "").name
@@ -444,7 +897,15 @@ async def upload_video(file: UploadFile = File(...)) -> dict:
             media_created_at=infer_media_created_at(
                 Path(original_name), video_path.stat().st_mtime
             ),
-            frames=[(frame.timestamp_ms, frame.image_name) for frame in frames],
+            frames=[
+                (
+                    frame.timestamp_ms,
+                    frame.image_name,
+                    frame.duplicate_of_timestamp_ms,
+                    frame.similarity_score,
+                )
+                for frame in frames
+            ],
         )
     except HTTPException:
         video_path.unlink(missing_ok=True)

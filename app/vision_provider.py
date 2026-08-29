@@ -26,9 +26,26 @@ USER_PROMPT = """分析这张视频关键帧，按以下结构返回：
   "scene": ["场景和环境"],
   "shot_type": ["横屏", "近景"],
   "ocr_text": ["画面中能够确认的文字"],
+  "search_aliases": {
+    "subjects": ["主体的常用名或简称"],
+    "actions": ["动作的常用说法"],
+    "scene": ["场景的常用说法"],
+    "shot_type": ["镜头类型的常用说法"]
+  },
   "confidence": 0.9
 }
+search_aliases 只补充与已确认内容完全等价的常用名、简称或口语说法，每个字段最多 6 项；
+不得猜测新人物、新物体、新动作、新地点或画面中不存在的内容，不确定时返回空数组。
 confidence 必须是 0 到 1 之间的数字。"""
+
+
+class VisionSearchAliases(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    subjects: list[str] = Field(default_factory=list, max_length=6)
+    actions: list[str] = Field(default_factory=list, max_length=6)
+    scene: list[str] = Field(default_factory=list, max_length=6)
+    shot_type: list[str] = Field(default_factory=list, max_length=6)
 
 
 class VisionResult(BaseModel):
@@ -40,6 +57,7 @@ class VisionResult(BaseModel):
     scene: list[str] = Field(default_factory=list)
     shot_type: list[str] = Field(default_factory=list)
     ocr_text: list[str] = Field(default_factory=list)
+    search_aliases: VisionSearchAliases = Field(default_factory=VisionSearchAliases)
     confidence: float = Field(ge=0, le=1)
 
 
@@ -119,7 +137,7 @@ class DeepSeekVisionProvider:
             "response_format": {"type": "json_object"},
             "thinking": {"type": "disabled"},
             "stream": False,
-            "max_tokens": 800,
+            "max_tokens": 1000,
         }
         headers = {
             "Authorization": f"Bearer {self.settings.api_key}",
@@ -192,4 +210,3 @@ class DeepSeekVisionProvider:
 
 def _optional_int(value: object) -> int | None:
     return int(value) if isinstance(value, (int, float)) else None
-

@@ -4,8 +4,10 @@ import json
 import re
 import sqlite3
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
+
+from app.search_vocabulary import expand_index_values
 
 
 SCHEMA = """
@@ -18,6 +20,7 @@ CREATE TABLE IF NOT EXISTS videos (
     media_created_at TEXT,
     source_kind TEXT NOT NULL DEFAULT 'upload',
     source_path TEXT,
+    source_folder TEXT,
     source_size INTEGER,
     source_mtime_ns INTEGER,
     content_sha256 TEXT,
@@ -31,8 +34,11 @@ CREATE TABLE IF NOT EXISTS frames (
     timestamp_ms INTEGER NOT NULL,
     image_name TEXT NOT NULL,
     vision_status TEXT NOT NULL DEFAULT 'pending',
+    duplicate_of_timestamp_ms INTEGER,
+    similarity_score REAL,
     vision_model TEXT,
     vision_analyzed_at TEXT,
+    vision_edited_at TEXT,
     vision_result_json TEXT,
     vision_raw_text TEXT,
     vision_error TEXT,
@@ -83,6 +89,7 @@ VIDEO_COLUMNS = {
     "media_created_at": "TEXT",
     "source_kind": "TEXT NOT NULL DEFAULT 'upload'",
     "source_path": "TEXT",
+    "source_folder": "TEXT",
     "source_size": "INTEGER",
     "source_mtime_ns": "INTEGER",
     "content_sha256": "TEXT",
@@ -92,8 +99,11 @@ VIDEO_COLUMNS = {
 
 FRAME_VISION_COLUMNS = {
     "vision_status": "TEXT NOT NULL DEFAULT 'pending'",
+    "duplicate_of_timestamp_ms": "INTEGER",
+    "similarity_score": "REAL",
     "vision_model": "TEXT",
     "vision_analyzed_at": "TEXT",
+    "vision_edited_at": "TEXT",
     "vision_result_json": "TEXT",
     "vision_raw_text": "TEXT",
     "vision_error": "TEXT",
@@ -176,6 +186,7 @@ class Database:
                 """
             )
             self._backfill_video_dates(connection)
+            self._backfill_source_folders(connection)
             connection.execute(
                 """
                 UPDATE scan_jobs
@@ -218,6 +229,23 @@ class Database:
                     (media_created_at, row["id"]),
                 )
 
+    @staticmethod
+    def _backfill_source_folders(connection: sqlite3.Connection) -> None:
+        rows = connection.execute(
+            """
+            SELECT id, source_path
+            FROM videos
+            WHERE source_folder IS NULL AND source_path IS NOT NULL
+            """
+        ).fetchall()
+        for row in rows:
+            source_path = str(row["source_path"])
+            path_type = PureWindowsPath if "\\" in source_path else Path
+            connection.execute(
+                "UPDATE videos SET source_folder = ? WHERE id = ?",
+                (str(path_type(source_path).parent), row["id"]),
+            )
+
     def _initialize_search_table(self, connection: sqlite3.Connection) -> None:
         existing = connection.execute(
             "SELECT sql FROM sqlite_master WHERE name = 'frame_search'"
@@ -251,10 +279,13 @@ class Database:
         stored_name: str,
         duration_ms: int,
         uploaded_at: str,
-        frames: list[tuple[int, str]],
+        frames: list[
+            tuple[int, str] | tuple[int, str, int | None, float | None]
+        ],
         media_created_at: str | None = None,
         source_kind: str = "upload",
         source_path: str | None = None,
+        source_folder: str | None = None,
         source_size: int | None = None,
         source_mtime_ns: int | None = None,
         content_sha256: str | None = None,
@@ -264,9 +295,9 @@ class Database:
                 """
                 INSERT INTO videos (
                     id, original_name, stored_name, duration_ms, uploaded_at,
-                    media_created_at, source_kind, source_path, source_size,
-                    source_mtime_ns, content_sha256, index_status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_analysis')
+                    media_created_at, source_kind, source_path, source_folder,
+                    source_size, source_mtime_ns, content_sha256, index_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_analysis')
                 """,
                 (
                     video_id,
@@ -277,17 +308,40 @@ class Database:
                     media_created_at or uploaded_at,
                     source_kind,
                     source_path,
+                    source_folder,
                     source_size,
                     source_mtime_ns,
                     content_sha256,
                 ),
             )
+            normalized_frames = []
+            for frame in frames:
+                timestamp_ms, image_name = frame[:2]
+                duplicate_of_timestamp_ms = frame[2] if len(frame) > 2 else None
+                similarity_score = frame[3] if len(frame) > 3 else None
+                vision_status = (
+                    "duplicate"
+                    if duplicate_of_timestamp_ms is not None
+                    else "pending"
+                )
+                normalized_frames.append(
+                    (
+                        video_id,
+                        timestamp_ms,
+                        image_name,
+                        vision_status,
+                        duplicate_of_timestamp_ms,
+                        similarity_score,
+                    )
+                )
             connection.executemany(
                 """
-                INSERT INTO frames (video_id, timestamp_ms, image_name)
-                VALUES (?, ?, ?)
+                INSERT INTO frames (
+                    video_id, timestamp_ms, image_name, vision_status,
+                    duplicate_of_timestamp_ms, similarity_score
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                [(video_id, timestamp_ms, image_name) for timestamp_ms, image_name in frames],
+                normalized_frames,
             )
 
     def find_video_by_source(
@@ -312,15 +366,61 @@ class Database:
             ).fetchone()
         return dict(row) if row else None
 
-    def count_videos(self) -> int:
+    def count_videos(
+        self,
+        *,
+        source_folder: str | None = None,
+        managed_uploads_only: bool = False,
+    ) -> int:
+        where = ""
+        parameters: tuple[Any, ...] = ()
+        if managed_uploads_only:
+            where = " WHERE source_folder IS NULL"
+        elif source_folder is not None:
+            where = " WHERE source_folder = ?"
+            parameters = (source_folder,)
         with self.connect() as connection:
-            row = connection.execute("SELECT COUNT(*) AS total FROM videos").fetchone()
+            row = connection.execute(
+                f"SELECT COUNT(*) AS total FROM videos{where}",
+                parameters,
+            ).fetchone()
         return int(row["total"])
 
-    def list_videos(self, limit: int = 200, offset: int = 0) -> list[dict[str, Any]]:
+    def list_video_folders(self) -> list[dict[str, Any]]:
         with self.connect() as connection:
             rows = connection.execute(
+                f"""
+                SELECT
+                    source_folder,
+                    COUNT(*) AS video_count,
+                    SUM(index_status = 'indexed') AS indexed_count,
+                    SUM(index_status != 'indexed') AS pending_count,
+                    MAX(media_created_at) AS latest_media_created_at
+                FROM videos
+                GROUP BY source_folder
+                ORDER BY latest_media_created_at DESC, source_folder
                 """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_videos(
+        self,
+        limit: int = 200,
+        offset: int = 0,
+        *,
+        source_folder: str | None = None,
+        managed_uploads_only: bool = False,
+    ) -> list[dict[str, Any]]:
+        where = ""
+        parameters: list[Any] = []
+        if managed_uploads_only:
+            where = "WHERE videos.source_folder IS NULL"
+        elif source_folder is not None:
+            where = "WHERE videos.source_folder = ?"
+            parameters.append(source_folder)
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
                 SELECT
                     videos.*,
                     COUNT(frames.id) AS frame_count,
@@ -328,6 +428,7 @@ class Database:
                     COALESCE(SUM(CASE WHEN frames.vision_status = 'failed' THEN 1 ELSE 0 END), 0) AS failed_count,
                     COALESCE(SUM(CASE WHEN frames.vision_status = 'processing' THEN 1 ELSE 0 END), 0) AS processing_count,
                     COALESCE(SUM(CASE WHEN frames.vision_status = 'pending' THEN 1 ELSE 0 END), 0) AS pending_count,
+                    COALESCE(SUM(CASE WHEN frames.vision_status = 'duplicate' THEN 1 ELSE 0 END), 0) AS duplicate_count,
                     (
                         SELECT first_frame.image_name
                         FROM frames AS first_frame
@@ -337,11 +438,12 @@ class Database:
                     ) AS first_frame_image_name
                 FROM videos
                 LEFT JOIN frames ON frames.video_id = videos.id
+                {where}
                 GROUP BY videos.id
                 ORDER BY videos.media_created_at DESC, videos.uploaded_at DESC
                 LIMIT ? OFFSET ?
                 """,
-                (limit, offset),
+                (*parameters, limit, offset),
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -384,7 +486,7 @@ class Database:
     ) -> None:
         counts = connection.execute(
             """
-            SELECT COUNT(*) AS total,
+            SELECT SUM(vision_status != 'duplicate') AS total,
                    SUM(vision_status = 'success') AS success,
                    SUM(vision_status = 'failed') AS failed,
                    SUM(vision_status = 'processing') AS processing,
@@ -440,9 +542,13 @@ class Database:
                 connection.execute(
                     """
                     UPDATE frames
-                    SET vision_status = 'pending',
+                    SET vision_status = CASE
+                            WHEN duplicate_of_timestamp_ms IS NULL THEN 'pending'
+                            ELSE 'duplicate'
+                        END,
                         vision_model = NULL,
                         vision_analyzed_at = NULL,
+                        vision_edited_at = NULL,
                         vision_result_json = NULL,
                         vision_raw_text = NULL,
                         vision_error = NULL,
@@ -492,6 +598,40 @@ class Database:
         claimed["vision_status"] = "processing"
         return claimed
 
+    def claim_duplicate_vision_frame(
+        self, video_id: str, frame_id: int
+    ) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            frame = connection.execute(
+                """
+                SELECT * FROM frames
+                WHERE id = ? AND video_id = ? AND vision_status = 'duplicate'
+                """,
+                (frame_id, video_id),
+            ).fetchone()
+            if frame is None:
+                return None
+            connection.execute(
+                """
+                UPDATE frames
+                SET vision_status = 'processing',
+                    duplicate_of_timestamp_ms = NULL,
+                    similarity_score = NULL
+                WHERE id = ?
+                """,
+                (frame_id,),
+            )
+            connection.execute(
+                "UPDATE videos SET index_status = 'analyzing', index_error = NULL WHERE id = ?",
+                (video_id,),
+            )
+        claimed = dict(frame)
+        claimed["vision_status"] = "processing"
+        claimed["duplicate_of_timestamp_ms"] = None
+        claimed["similarity_score"] = None
+        return claimed
+
     def save_vision_success(
         self,
         *,
@@ -515,6 +655,7 @@ class Database:
                 SET vision_status = 'success',
                     vision_model = ?,
                     vision_analyzed_at = ?,
+                    vision_edited_at = NULL,
                     vision_result_json = ?,
                     vision_raw_text = ?,
                     vision_error = NULL,
@@ -542,6 +683,38 @@ class Database:
                 pass
             if video_row:
                 self._refresh_video_index_status(connection, video_row["video_id"])
+
+    def update_vision_result(
+        self,
+        *,
+        video_id: str,
+        frame_id: int,
+        result_json: str,
+        edited_at: str,
+    ) -> bool:
+        with self.connect() as connection:
+            frame = connection.execute(
+                """
+                SELECT id
+                FROM frames
+                WHERE id = ? AND video_id = ? AND vision_status = 'success'
+                """,
+                (frame_id, video_id),
+            ).fetchone()
+            if frame is None:
+                return False
+            connection.execute(
+                """
+                UPDATE frames
+                SET vision_result_json = ?,
+                    vision_edited_at = ?,
+                    vision_error = NULL
+                WHERE id = ?
+                """,
+                (result_json, edited_at, frame_id),
+            )
+            self._upsert_search_frame(connection, frame_id)
+        return True
 
     def save_vision_failure(
         self,
@@ -605,18 +778,29 @@ class Database:
 
         result = json.loads(row["vision_result_json"])
 
-        def joined(field: str) -> str:
+        search_aliases = result.get("search_aliases") or {}
+        if not isinstance(search_aliases, dict):
+            raise TypeError("search_aliases must be an object")
+
+        def joined(field: str, *, expand_aliases: bool = True) -> str:
             value = result.get(field, [])
             if not isinstance(value, list):
                 raise TypeError(f"{field} must be a list")
-            return " ".join(str(item).strip() for item in value if str(item).strip())
+            if not expand_aliases:
+                return " ".join(
+                    str(item).strip() for item in value if str(item).strip()
+                )
+            aliases = search_aliases.get(field, [])
+            if not isinstance(aliases, list):
+                raise TypeError(f"search_aliases.{field} must be a list")
+            return " ".join(expand_index_values(value, aliases))
 
         summary = str(result.get("summary", "")).strip()
         subjects = joined("subjects")
         actions = joined("actions")
         scene = joined("scene")
         shot_type = joined("shot_type")
-        ocr_text = joined("ocr_text")
+        ocr_text = joined("ocr_text", expand_aliases=False)
         timestamp_ms = int(row["timestamp_ms"])
         time_text = f"{timestamp_ms / 1000:g}秒 {timestamp_ms}毫秒"
         values = (

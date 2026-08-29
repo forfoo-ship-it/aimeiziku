@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>AI媒资库 · 视频素材智能检索系统</title>
-    <link rel="stylesheet" href="/static/styles.css">
+    <link rel="stylesheet" href="/static/styles.css?v=20260829-search-cleanup">
   </head>
   <body>
     <header class="topbar">
@@ -20,7 +20,6 @@
         <div class="search-copy">
           <p class="panel-kicker">已识别画面索引</p>
           <h2 id="search-title">描述你想找的画面</h2>
-          <p>例如：找到龙舟冲刺时鼓手击鼓的横屏镜头</p>
         </div>
         <form id="search-form" class="search-form" role="search">
           <div class="search-input-row">
@@ -28,12 +27,6 @@
               autocomplete="off" placeholder="输入人物、动作、场景、镜头类型或画面文字">
             <button id="search-button" type="submit">搜索画面</button>
             <button id="clear-search-button" class="secondary-button" type="button" hidden>清空</button>
-          </div>
-          <div class="search-examples" aria-label="搜索示例">
-            <span>试试：</span>
-            <button type="button" data-search-example="龙舟鼓手击鼓的横屏镜头">龙舟鼓手击鼓的横屏镜头</button>
-            <button type="button" data-search-example="中南门古城夜景航拍">中南门古城夜景航拍</button>
-            <button type="button" data-search-example="阳戏演员表演的近景">阳戏演员表演的近景</button>
           </div>
         </form>
         <div id="search-status" class="status" role="status" aria-live="polite"></div>
@@ -87,16 +80,23 @@
           <div class="video-library-section">
             <div class="video-library-heading">
               <div>
-                <h3>全部视频素材</h3>
-                <p id="video-library-count">正在读取视频……</p>
+                <h3 id="video-library-title">监测素材目录</h3>
+                <p id="video-library-count">正在读取监测目录……</p>
               </div>
-              <div class="video-selection-actions" aria-label="视频多选操作">
+              <div id="video-selection-actions" class="video-selection-actions" aria-label="视频多选操作" hidden>
                 <button id="select-all-videos" class="library-tool-button" type="button">全选</button>
                 <button id="select-pending-videos" class="library-tool-button" type="button">只选未识别</button>
                 <button id="clear-video-selection" class="library-tool-button" type="button">清空选择</button>
                 <span id="selected-video-count">已选 0 个</span>
                 <button id="batch-analyze-button" type="button" disabled>识别所选</button>
                 <button id="batch-reanalyze-button" class="secondary-button" type="button" disabled>重新分析所选</button>
+              </div>
+            </div>
+            <div id="video-folder-navigation" class="video-folder-navigation" hidden>
+              <button id="video-folder-back" type="button">返回监测目录</button>
+              <div>
+                <strong id="current-video-folder-name"></strong>
+                <p id="current-video-folder-path"></p>
               </div>
             </div>
             <div id="batch-vision-status" class="status" role="status" aria-live="polite"></div>
@@ -135,9 +135,22 @@
         </div>
         <div id="vision-status" class="status" role="status" aria-live="polite"></div>
       </section>
+
+      <section id="library-frame-detail" class="library-frame-detail" hidden aria-labelledby="library-frame-detail-title">
+        <div class="library-frame-detail-heading">
+          <div>
+            <p class="panel-kicker">视频所属关键帧</p>
+            <h2 id="library-frame-detail-title">已识别画面</h2>
+            <p id="library-frame-detail-meta">请选择一个已识别视频查看详情。</p>
+          </div>
+          <button id="library-frame-detail-close" type="button">收起详情</button>
+        </div>
+        <div id="library-frame-detail-status" class="status" role="status" aria-live="polite"></div>
+        <div id="library-frame-detail-list" class="library-frame-detail-grid"></div>
+      </section>
       </section>
 
-      <section id="workspace" class="workspace" aria-label="视频关键帧工作区">
+      <section id="workspace" class="workspace" hidden aria-label="视频关键帧工作区">
         <aside class="frames-panel">
           <div class="panel-heading">
             <div>
@@ -153,7 +166,7 @@
           <div class="panel-heading">
             <div>
               <p class="panel-kicker">历史素材原片</p>
-              <h2 id="video-title">等待导入视频</h2>
+              <h2 id="video-title">等待选择关键帧</h2>
             </div>
             <div class="player-heading-meta">
               <span id="video-index-status" class="index-status-badge pending_analysis">待识别</span>
@@ -161,22 +174,28 @@
             </div>
           </div>
           <div class="player-shell">
-            <video id="video-player" controls preload="metadata"></video>
+            <video id="video-player" controls preload="metadata" hidden></video>
             <div id="empty-state" class="empty-state">
               <div class="empty-icon" aria-hidden="true">▶</div>
-              <strong>这里将显示原视频</strong>
-              <span>导入 MP4 后，可从左侧关键帧快速定位。</span>
+              <strong>请点击关键帧播放视频</strong>
+              <span>选择搜索结果后，将自动载入原片并跳转到对应时间点。</span>
             </div>
           </div>
           <div class="playback-info">
-            <span>当前定位</span>
-            <strong id="current-position">00:00.000</strong>
+            <div class="file-location-actions">
+              <button id="open-file-location" type="button" disabled>打开视频所在位置</button>
+              <span id="file-location-status" role="status" aria-live="polite"></span>
+            </div>
+            <div class="current-position-info">
+              <span>当前定位</span>
+              <strong id="current-position">00:00.000</strong>
+            </div>
           </div>
         </section>
       </section>
     </main>
 
     <script>window.__INITIAL_VIDEO__ = {{ initial_video | tojson }};</script>
-    <script src="/static/app.js" defer></script>
+    <script src="/static/app.js?v=20260829-search-cleanup" defer></script>
   </body>
 </html>

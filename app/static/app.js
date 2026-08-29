@@ -21,7 +21,6 @@ const searchInput = document.querySelector("#search-input");
 const searchButton = document.querySelector("#search-button");
 const clearSearchButton = document.querySelector("#clear-search-button");
 const searchStatus = document.querySelector("#search-status");
-const searchExamples = document.querySelectorAll("[data-search-example]");
 const listKicker = document.querySelector("#list-kicker");
 const listTitle = document.querySelector("#list-title");
 const videoIndexStatus = document.querySelector("#video-index-status");
@@ -34,6 +33,12 @@ const folderStatus = document.querySelector("#folder-status");
 const watchFoldersList = document.querySelector("#watch-folders-list");
 const videoLibraryList = document.querySelector("#video-library-list");
 const videoLibraryCount = document.querySelector("#video-library-count");
+const videoLibraryTitle = document.querySelector("#video-library-title");
+const videoSelectionActions = document.querySelector("#video-selection-actions");
+const videoFolderNavigation = document.querySelector("#video-folder-navigation");
+const videoFolderBack = document.querySelector("#video-folder-back");
+const currentVideoFolderName = document.querySelector("#current-video-folder-name");
+const currentVideoFolderPath = document.querySelector("#current-video-folder-path");
 const selectAllVideosButton = document.querySelector("#select-all-videos");
 const selectPendingVideosButton = document.querySelector("#select-pending-videos");
 const clearVideoSelectionButton = document.querySelector("#clear-video-selection");
@@ -46,6 +51,15 @@ const batchVisionProgressBar = document.querySelector("#batch-vision-progress-ba
 const adminConsole = document.querySelector("#admin-console");
 const adminEntryButton = document.querySelector("#admin-entry-button");
 const adminCloseButton = document.querySelector("#admin-close-button");
+const workspace = document.querySelector("#workspace");
+const openFileLocationButton = document.querySelector("#open-file-location");
+const fileLocationStatus = document.querySelector("#file-location-status");
+const libraryFrameDetail = document.querySelector("#library-frame-detail");
+const libraryFrameDetailTitle = document.querySelector("#library-frame-detail-title");
+const libraryFrameDetailMeta = document.querySelector("#library-frame-detail-meta");
+const libraryFrameDetailStatus = document.querySelector("#library-frame-detail-status");
+const libraryFrameDetailList = document.querySelector("#library-frame-detail-list");
+const libraryFrameDetailClose = document.querySelector("#library-frame-detail-close");
 
 let currentVideo = null;
 let analysisRunning = false;
@@ -53,6 +67,9 @@ let searchRunning = false;
 let batchAnalysisRunning = false;
 let libraryVideos = [];
 let previousActiveScanCount = null;
+let inspectedLibraryVideoId = null;
+let currentVideoRoot = null;
+let currentVideoFolder = null;
 const selectedVideoIds = new Set();
 
 const indexStatusLabels = {
@@ -93,10 +110,8 @@ function setAdminConsoleOpen(open) {
   adminEntryButton.textContent = open ? "后台已打开" : "进入素材管理后台";
   if (open) {
     loadFolderDashboard(true);
-    adminConsole.scrollIntoView({ behavior: "smooth", block: "start" });
     adminCloseButton.focus({ preventScroll: true });
   } else {
-    document.querySelector(".search-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
     adminEntryButton.focus({ preventScroll: true });
   }
 }
@@ -121,11 +136,31 @@ function selectFrame(card, timestampSeconds) {
   player.play().catch(() => {});
 }
 
+function resetPlayerForFrameSelection() {
+  currentVideo = null;
+  player.pause();
+  player.removeAttribute("src");
+  player.load();
+  player.hidden = true;
+  emptyState.hidden = false;
+  playerShell.classList.remove("portrait-video");
+  videoTitle.textContent = "等待选择关键帧";
+  durationLabel.textContent = "--:--";
+  videoIndexStatus.className = "index-status-badge pending_analysis";
+  videoIndexStatus.textContent = "尚未选择";
+  currentPosition.textContent = "00:00.000";
+  openFileLocationButton.disabled = true;
+  fileLocationStatus.textContent = "";
+  fileLocationStatus.className = "";
+}
+
 function renderPlayer(video) {
   if (!video) return;
   currentVideo = video;
   videoTitle.textContent = video.original_name;
   durationLabel.textContent = formatTime(video.duration_seconds);
+  openFileLocationButton.disabled = false;
+  fileLocationStatus.textContent = "";
   setIndexStatusBadge(videoIndexStatus, video.index_status);
   if (player.getAttribute("src") !== video.video_url) {
     playerShell.classList.remove("portrait-video");
@@ -170,6 +205,7 @@ function renderVisionResult(frame) {
     processing: "识别中",
     success: "已识别",
     failed: "识别失败",
+    duplicate: "相似画面已跳过",
   };
   status.textContent = statusLabels[frame.vision_status] || "待识别";
   container.append(status);
@@ -189,13 +225,22 @@ function renderVisionResult(frame) {
     meta.className = "vision-meta";
     const confidence = Math.round((frame.vision_result.confidence || 0) * 100);
     const duration = frame.vision_duration_ms ? ` · ${frame.vision_duration_ms}ms` : "";
-    meta.textContent = `置信度 ${confidence}%${duration}`;
+    const edited = frame.vision_edited_at ? " · 已人工修正" : "";
+    meta.textContent = `置信度 ${confidence}%${duration}${edited}`;
     container.append(meta);
   } else if (frame.vision_status === "failed") {
     const error = document.createElement("p");
     error.className = "vision-error";
     error.textContent = frame.vision_error || "该帧识别失败，可再次尝试。";
     container.append(error);
+  } else if (frame.vision_status === "duplicate") {
+    const summary = document.createElement("p");
+    summary.className = "vision-summary";
+    const similarity = frame.similarity_score
+      ? `，相似度 ${(frame.similarity_score * 100).toFixed(1)}%`
+      : "";
+    summary.textContent = `与 ${formatTime(frame.duplicate_of_timestamp_seconds, true)} 的代表帧高度相似${similarity}，未重复调用AI。`;
+    container.append(summary);
   }
   return container;
 }
@@ -203,7 +248,8 @@ function renderVisionResult(frame) {
 function renderVisionControls(video) {
   const progress = video.vision_progress;
   visionPanel.hidden = false;
-  visionProgress.textContent = `已完成 ${progress.completed}/${progress.total} 帧 · 成功 ${progress.success} · 失败 ${progress.failed}`;
+  const duplicate = progress.duplicate > 0 ? ` · 跳过相似 ${progress.duplicate}` : "";
+  visionProgress.textContent = `已完成 ${progress.completed}/${progress.total} 帧 · 成功 ${progress.success} · 失败 ${progress.failed}${duplicate}`;
   const allSuccessful = progress.total > 0 && progress.success === progress.total;
   visionButton.textContent = progress.failed > 0 ? "重试失败画面" : (allSuccessful ? "识别已完成" : "AI识别画面");
   visionButton.disabled = analysisRunning || batchAnalysisRunning || allSuccessful;
@@ -277,6 +323,8 @@ async function openSearchResult(card, result) {
 }
 
 function renderSearchResults(response) {
+  resetPlayerForFrameSelection();
+  workspace.hidden = false;
   listKicker.textContent = `检索“${response.query}”`;
   listTitle.textContent = "搜索结果";
   frameCount.textContent = `${response.count} 条`;
@@ -396,6 +444,7 @@ async function runSearch() {
   }
 
   searchRunning = true;
+  workspace.hidden = true;
   searchButton.disabled = true;
   searchButton.textContent = "搜索中…";
   setStatus(searchStatus, "正在检索已保存的 AI 画面索引…", "working");
@@ -544,13 +593,369 @@ async function openLibraryVideo(video) {
   }
 }
 
+function renderLibraryFrameDetail(video) {
+  inspectedLibraryVideoId = video.id;
+  libraryFrameDetail.hidden = false;
+  libraryFrameDetailTitle.textContent = video.original_name;
+  const duplicate = video.vision_progress.duplicate > 0
+    ? ` · 跳过相似 ${video.vision_progress.duplicate} 张`
+    : "";
+  libraryFrameDetailMeta.textContent = `共 ${video.frames.length} 张关键帧 · 已识别 ${video.vision_progress.success}/${video.vision_progress.total}${duplicate}`;
+  setStatus(libraryFrameDetailStatus, "");
+  libraryFrameDetailList.replaceChildren();
+
+  video.frames.forEach((frame, index) => {
+    const card = document.createElement("article");
+    card.className = "library-frame-detail-card";
+
+    const image = document.createElement("img");
+    image.src = frame.image_url;
+    image.alt = `${video.original_name} 在 ${formatTime(frame.timestamp_seconds)} 的关键帧`;
+    image.loading = "lazy";
+    applyImageOrientation(image);
+
+    const meta = document.createElement("div");
+    meta.className = "library-frame-detail-time";
+    const number = document.createElement("span");
+    number.textContent = `关键帧 ${String(index + 1).padStart(2, "0")}`;
+    const timestamp = document.createElement("strong");
+    timestamp.textContent = formatTime(frame.timestamp_seconds, true);
+    meta.append(number, timestamp);
+
+    const resultView = renderVisionResult(frame);
+    card.append(image, meta, resultView);
+    if (frame.vision_status === "success" && frame.vision_result) {
+      const actions = document.createElement("div");
+      actions.className = "library-frame-detail-actions";
+      const editButton = document.createElement("button");
+      editButton.type = "button";
+      editButton.textContent = "编辑识别信息";
+      editButton.addEventListener("click", () => {
+        editButton.hidden = true;
+        resultView.hidden = true;
+        card.append(createVisionEditForm(video, frame, resultView, editButton));
+      });
+      actions.append(editButton);
+      card.append(actions);
+    } else if (frame.vision_status === "duplicate") {
+      const actions = document.createElement("div");
+      actions.className = "library-frame-detail-actions";
+      const analyzeButton = document.createElement("button");
+      analyzeButton.type = "button";
+      analyzeButton.textContent = "仍然分析此帧";
+      analyzeButton.addEventListener("click", async () => {
+        if (!window.confirm("此操作会单独调用一次视觉API，确认仍然分析这张相似画面吗？")) return;
+        analyzeButton.disabled = true;
+        analyzeButton.textContent = "正在识别……";
+        setStatus(libraryFrameDetailStatus, "正在单独识别所选相似帧……", "working");
+        try {
+          const updated = await requestJson(
+            `/api/videos/${encodeURIComponent(video.id)}/frames/${frame.id}/vision/analyze`,
+            { method: "POST" }
+          );
+          renderLibraryFrameDetail(updated);
+          setStatus(libraryFrameDetailStatus, "该相似帧已单独完成识别并加入搜索索引。", "success");
+          loadVideoLibrary();
+        } catch (error) {
+          setStatus(libraryFrameDetailStatus, error.message || "该帧识别失败。", "error");
+          analyzeButton.disabled = false;
+          analyzeButton.textContent = "仍然分析此帧";
+        }
+      });
+      actions.append(analyzeButton);
+      card.append(actions);
+    }
+    libraryFrameDetailList.append(card);
+  });
+
+  videoLibraryList.querySelectorAll(".video-library-card").forEach((card) => {
+    card.classList.toggle("inspecting", card.dataset.videoId === video.id);
+  });
+}
+
+function parseVisionList(value) {
+  return [...new Set(
+    String(value || "")
+      .split(/[\n,，、;；]+/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+  )];
+}
+
+function appendVisionEditField(form, labelText, fieldName, value, multiline = false) {
+  const label = document.createElement("label");
+  label.className = "vision-edit-field";
+  const title = document.createElement("span");
+  title.textContent = labelText;
+  const input = multiline
+    ? document.createElement("textarea")
+    : document.createElement("input");
+  input.name = fieldName;
+  input.value = value;
+  input.required = fieldName === "summary";
+  if (multiline) input.rows = fieldName === "summary" ? 3 : 2;
+  label.append(title, input);
+  form.append(label);
+  return input;
+}
+
+function createVisionEditForm(video, frame, resultView, editButton) {
+  const result = frame.vision_result;
+  const form = document.createElement("form");
+  form.className = "vision-edit-form";
+  appendVisionEditField(form, "画面摘要", "summary", result.summary, true);
+  appendVisionEditField(form, "主体", "subjects", result.subjects.join("、"), true);
+  appendVisionEditField(form, "动作", "actions", result.actions.join("、"), true);
+  appendVisionEditField(form, "场景", "scene", result.scene.join("、"), true);
+  appendVisionEditField(form, "镜头类型", "shot_type", result.shot_type.join("、"), true);
+  appendVisionEditField(form, "OCR文字", "ocr_text", result.ocr_text.join("、"), true);
+
+  const confidence = appendVisionEditField(
+    form,
+    "置信度（0-100）",
+    "confidence",
+    String(Math.round((result.confidence || 0) * 100))
+  );
+  confidence.type = "number";
+  confidence.min = "0";
+  confidence.max = "100";
+  confidence.step = "1";
+
+  const hint = document.createElement("p");
+  hint.className = "vision-edit-hint";
+  hint.textContent = "主体、动作等多个内容可用顿号、逗号或换行分隔。保存后会立即更新搜索索引，不会调用AI。";
+
+  const formActions = document.createElement("div");
+  formActions.className = "vision-edit-actions";
+  const saveButton = document.createElement("button");
+  saveButton.type = "submit";
+  saveButton.textContent = "保存修改";
+  const cancelButton = document.createElement("button");
+  cancelButton.type = "button";
+  cancelButton.className = "secondary-button";
+  cancelButton.textContent = "取消";
+  cancelButton.addEventListener("click", () => {
+    form.remove();
+    resultView.hidden = false;
+    editButton.hidden = false;
+  });
+  formActions.append(saveButton, cancelButton);
+  form.append(hint, formActions);
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const confidenceValue = Number(form.elements.confidence.value);
+    if (!Number.isFinite(confidenceValue) || confidenceValue < 0 || confidenceValue > 100) {
+      setStatus(libraryFrameDetailStatus, "置信度必须填写 0 至 100 的数字。", "error");
+      form.elements.confidence.focus();
+      return;
+    }
+    const summary = form.elements.summary.value.trim();
+    if (!summary) {
+      setStatus(libraryFrameDetailStatus, "画面摘要不能为空。", "error");
+      form.elements.summary.focus();
+      return;
+    }
+
+    saveButton.disabled = true;
+    cancelButton.disabled = true;
+    saveButton.textContent = "正在保存……";
+    setStatus(libraryFrameDetailStatus, "正在保存人工修正并更新搜索索引……", "working");
+    try {
+      const updated = await requestJson(
+        `/api/videos/${encodeURIComponent(video.id)}/frames/${frame.id}/vision`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            summary,
+            subjects: parseVisionList(form.elements.subjects.value),
+            actions: parseVisionList(form.elements.actions.value),
+            scene: parseVisionList(form.elements.scene.value),
+            shot_type: parseVisionList(form.elements.shot_type.value),
+            ocr_text: parseVisionList(form.elements.ocr_text.value),
+            confidence: confidenceValue / 100,
+          }),
+        }
+      );
+      renderLibraryFrameDetail(updated);
+      setStatus(libraryFrameDetailStatus, "人工修正已保存，搜索索引已同步更新。", "success");
+    } catch (error) {
+      setStatus(libraryFrameDetailStatus, error.message || "识别信息保存失败。", "error");
+      saveButton.disabled = false;
+      cancelButton.disabled = false;
+      saveButton.textContent = "保存修改";
+    }
+  });
+  return form;
+}
+
+async function openLibraryFrameDetail(video, trigger) {
+  const previousLabel = trigger.textContent;
+  trigger.disabled = true;
+  trigger.textContent = "正在读取……";
+  libraryFrameDetail.hidden = false;
+  setStatus(libraryFrameDetailStatus, "正在读取关键帧和识别信息……", "working");
+  try {
+    const detail = await requestJson(`/api/videos/${encodeURIComponent(video.id)}`);
+    renderLibraryFrameDetail(detail);
+    libraryFrameDetail.scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (error) {
+    setStatus(libraryFrameDetailStatus, error.message || "关键帧详情读取失败。", "error");
+  } finally {
+    trigger.disabled = false;
+    trigger.textContent = previousLabel;
+  }
+}
+
+function renderVideoRoots(response) {
+  libraryVideos = [];
+  selectedVideoIds.clear();
+  updateLibrarySelectionControls();
+  videoSelectionActions.hidden = true;
+  videoFolderNavigation.hidden = true;
+  videoLibraryTitle.textContent = "监测素材目录";
+  videoLibraryCount.textContent = `共 ${response.count} 个监测目录或素材入口，点击查看下级文件夹`;
+  videoLibraryList.replaceChildren();
+
+  if (response.roots.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "folder-empty";
+    empty.textContent = "尚未添加监测目录，也没有已上传的历史视频。";
+    videoLibraryList.append(empty);
+    return;
+  }
+
+  response.roots.forEach((root) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "video-folder-card";
+    button.setAttribute("aria-label", `打开监测目录 ${root.name}`);
+
+    const icon = document.createElement("span");
+    icon.className = "video-folder-icon";
+    icon.setAttribute("aria-hidden", "true");
+    icon.textContent = root.managed_uploads ? "系统目录" : "监测目录";
+
+    const body = document.createElement("span");
+    body.className = "video-folder-body";
+    const nameRow = document.createElement("span");
+    nameRow.className = "video-folder-name-row";
+    const name = document.createElement("strong");
+    name.textContent = root.name;
+    const count = document.createElement("span");
+    count.textContent = `${root.folder_count} 个文件夹 · ${root.video_count} 个视频`;
+    nameRow.append(name, count);
+
+    const path = document.createElement("span");
+    path.className = "video-folder-path";
+    path.textContent = root.path;
+    path.title = root.path;
+
+    const progress = document.createElement("span");
+    progress.className = "video-folder-progress";
+    const pending = root.pending_count > 0
+      ? ` · 待处理 ${root.pending_count}`
+      : " · 已全部建立索引";
+    progress.textContent = `已建立索引 ${root.indexed_count}/${root.video_count}${pending}`;
+    body.append(nameRow, path, progress);
+    button.append(icon, body);
+    button.addEventListener("click", () => {
+      currentVideoRoot = root;
+      currentVideoFolder = root.direct_videos
+        ? {
+            folder_key: "managed-uploads",
+            name: root.name,
+            path: root.path,
+            managed_uploads: true,
+          }
+        : null;
+      selectedVideoIds.clear();
+      loadVideoLibrary(true);
+    });
+    videoLibraryList.append(button);
+  });
+}
+
+function renderVideoFolders(response) {
+  libraryVideos = [];
+  selectedVideoIds.clear();
+  updateLibrarySelectionControls();
+  videoSelectionActions.hidden = true;
+  videoFolderNavigation.hidden = false;
+  videoFolderBack.textContent = "返回监测目录";
+  videoLibraryTitle.textContent = currentVideoRoot?.name || "素材文件夹";
+  currentVideoFolderName.textContent = currentVideoRoot?.name || "";
+  currentVideoFolderPath.textContent = currentVideoRoot?.path || "";
+  videoLibraryCount.textContent = `共 ${response.count} 个包含已入库视频的文件夹，点击查看视频`;
+  videoLibraryList.replaceChildren();
+
+  if (response.folders.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "folder-empty";
+    empty.textContent = "该监测目录下尚无已入库视频。";
+    videoLibraryList.append(empty);
+    return;
+  }
+
+  response.folders.forEach((folder) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "video-folder-card";
+    button.setAttribute("aria-label", `打开素材文件夹 ${folder.name}`);
+
+    const icon = document.createElement("span");
+    icon.className = "video-folder-icon";
+    icon.setAttribute("aria-hidden", "true");
+    icon.textContent = "文件夹";
+
+    const body = document.createElement("span");
+    body.className = "video-folder-body";
+    const nameRow = document.createElement("span");
+    nameRow.className = "video-folder-name-row";
+    const name = document.createElement("strong");
+    name.textContent = folder.name;
+    const count = document.createElement("span");
+    count.textContent = `${folder.video_count} 个视频`;
+    nameRow.append(name, count);
+
+    const path = document.createElement("span");
+    path.className = "video-folder-path";
+    path.textContent = folder.path;
+    path.title = folder.path;
+
+    const progress = document.createElement("span");
+    progress.className = "video-folder-progress";
+    const pending = folder.pending_count > 0
+      ? ` · 待处理 ${folder.pending_count}`
+      : " · 已全部建立索引";
+    progress.textContent = `已建立索引 ${folder.indexed_count}/${folder.video_count}${pending}`;
+    body.append(nameRow, path, progress);
+    button.append(icon, body);
+    button.addEventListener("click", () => {
+      currentVideoFolder = folder;
+      selectedVideoIds.clear();
+      loadVideoLibrary(true);
+    });
+    videoLibraryList.append(button);
+  });
+}
+
 function renderVideoLibrary(videos, total = videos.length) {
   libraryVideos = videos;
   const availableIds = new Set(videos.map((video) => video.id));
   selectedVideoIds.forEach((id) => {
     if (!availableIds.has(id)) selectedVideoIds.delete(id);
   });
-  videoLibraryCount.textContent = `共 ${total} 个视频，当前已显示全部`;
+  videoSelectionActions.hidden = false;
+  videoFolderNavigation.hidden = false;
+  videoFolderBack.textContent = currentVideoRoot?.direct_videos
+    ? "返回监测目录"
+    : "返回上级文件夹";
+  videoLibraryTitle.textContent = currentVideoFolder?.name || "文件夹内视频";
+  currentVideoFolderName.textContent = currentVideoFolder?.name || "";
+  currentVideoFolderPath.textContent = currentVideoFolder?.path || "";
+  videoLibraryCount.textContent = `本文件夹共 ${total} 个视频，当前已显示全部`;
   videoLibraryList.replaceChildren();
   if (videos.length === 0) {
     const empty = document.createElement("p");
@@ -565,6 +970,7 @@ function renderVideoLibrary(videos, total = videos.length) {
     const card = document.createElement("article");
     card.className = "video-library-card";
     card.dataset.videoId = video.id;
+    card.classList.toggle("inspecting", inspectedLibraryVideoId === video.id);
 
     const preview = document.createElement("button");
     preview.type = "button";
@@ -607,8 +1013,20 @@ function renderVideoLibrary(videos, total = videos.length) {
     setIndexStatusBadge(badge, video.index_status);
     titleRow.append(name, badge);
     const meta = document.createElement("p");
-    meta.textContent = `${mediaMonthLabel(video.media_created_at)} · ${video.frame_count} 帧 · 已识别 ${video.success_count}/${video.frame_count}`;
+    const duplicateMeta = video.duplicate_count > 0
+      ? ` · 跳过相似 ${video.duplicate_count}`
+      : "";
+    meta.textContent = `${mediaMonthLabel(video.media_created_at)} · ${video.frame_count} 帧${duplicateMeta} · 已识别 ${video.success_count}/${video.analysis_frame_count}`;
     details.append(titleRow, meta);
+    if (video.success_count > 0) {
+      const inspectButton = document.createElement("button");
+      inspectButton.type = "button";
+      inspectButton.className = "library-frame-inspect-button";
+      inspectButton.textContent = `已识别画面 ${video.success_count}`;
+      inspectButton.setAttribute("aria-label", `查看 ${video.original_name} 的已识别画面`);
+      inspectButton.addEventListener("click", () => openLibraryFrameDetail(video, inspectButton));
+      details.append(inspectButton);
+    }
     card.append(preview, selection, details);
     videoLibraryList.append(card);
   });
@@ -617,11 +1035,25 @@ function renderVideoLibrary(videos, total = videos.length) {
 
 async function loadVideoLibrary(showErrors = false) {
   try {
+    if (!currentVideoRoot) {
+      const response = await requestJson("/api/video-roots");
+      renderVideoRoots(response);
+      return;
+    }
+    if (!currentVideoFolder) {
+      const response = await requestJson(
+        `/api/video-folders?root_key=${encodeURIComponent(currentVideoRoot.root_key)}`
+      );
+      renderVideoFolders(response);
+      return;
+    }
     const videos = [];
     let offset = 0;
     let total = 0;
     do {
-      const page = await requestJson(`/api/videos?limit=500&offset=${offset}`);
+      const page = await requestJson(
+        `/api/videos?limit=500&offset=${offset}&folder_key=${encodeURIComponent(currentVideoFolder.folder_key)}`
+      );
       videos.push(...page.videos);
       total = page.total;
       offset += page.count;
@@ -796,6 +1228,8 @@ form.addEventListener("submit", async (event) => {
     clearSearchButton.hidden = true;
     setStatus(searchStatus, "");
     renderVideo(result);
+    currentVideoRoot = null;
+    currentVideoFolder = null;
     loadFolderDashboard();
     setStatus(uploadStatus, `索引完成：已提取 ${result.frames.length} 张关键帧。`, "success");
   } catch (error) {
@@ -839,25 +1273,61 @@ searchForm.addEventListener("submit", (event) => {
   event.preventDefault();
   runSearch();
 });
-searchExamples.forEach((button) => {
-  button.addEventListener("click", () => {
-    searchInput.value = button.dataset.searchExample;
-    runSearch();
-  });
-});
 clearSearchButton.addEventListener("click", () => {
   searchInput.value = "";
   clearSearchButton.hidden = true;
   setStatus(searchStatus, "");
-  if (currentVideo) renderVideo(currentVideo);
+  resetPlayerForFrameSelection();
+  workspace.hidden = true;
   searchInput.focus();
 });
 
 adminEntryButton.addEventListener("click", () => setAdminConsoleOpen(true));
 adminCloseButton.addEventListener("click", () => setAdminConsoleOpen(false));
+videoFolderBack.addEventListener("click", () => {
+  if (currentVideoFolder && !currentVideoRoot?.direct_videos) {
+    currentVideoFolder = null;
+  } else {
+    currentVideoFolder = null;
+    currentVideoRoot = null;
+  }
+  selectedVideoIds.clear();
+  inspectedLibraryVideoId = null;
+  libraryFrameDetail.hidden = true;
+  libraryFrameDetailList.replaceChildren();
+  setStatus(batchVisionStatus, "");
+  loadVideoLibrary(true);
+});
+libraryFrameDetailClose.addEventListener("click", () => {
+  inspectedLibraryVideoId = null;
+  libraryFrameDetail.hidden = true;
+  libraryFrameDetailList.replaceChildren();
+  videoLibraryList.querySelectorAll(".video-library-card.inspecting").forEach((card) => card.classList.remove("inspecting"));
+});
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !adminConsole.hidden && !batchAnalysisRunning && !analysisRunning) {
     setAdminConsoleOpen(false);
+  }
+});
+
+openFileLocationButton.addEventListener("click", async () => {
+  if (!currentVideo) return;
+  openFileLocationButton.disabled = true;
+  fileLocationStatus.textContent = "正在打开……";
+  fileLocationStatus.className = "working";
+  try {
+    const response = await requestJson(`/api/videos/${currentVideo.id}/open-location`, {
+      method: "POST",
+    });
+    fileLocationStatus.textContent = response.location_kind === "source"
+      ? "已在资源管理器中定位原始视频"
+      : "已定位系统保存的视频副本";
+    fileLocationStatus.className = "success";
+  } catch (error) {
+    fileLocationStatus.textContent = error.message || "无法打开视频所在位置。";
+    fileLocationStatus.className = "error";
+  } finally {
+    openFileLocationButton.disabled = false;
   }
 });
 
@@ -898,6 +1368,10 @@ player.addEventListener("loadedmetadata", () => {
   playerShell.classList.toggle("portrait-video", player.videoHeight > player.videoWidth);
 });
 
-renderVideo(window.__INITIAL_VIDEO__);
+if (window.__INITIAL_VIDEO__) {
+  renderVideo(window.__INITIAL_VIDEO__);
+} else {
+  resetPlayerForFrameSelection();
+}
 loadFolderDashboard(true);
 window.setInterval(() => loadWatchFolderStatus(false), 3000);

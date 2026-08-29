@@ -28,7 +28,17 @@ class VisionAnalysisService:
         frame = self.database.claim_next_vision_frame(video_id)
         if frame is None:
             return False
+        await self._process_claimed_frame(video_id, frame)
+        return True
 
+    async def process_duplicate(self, video_id: str, frame_id: int) -> bool:
+        frame = self.database.claim_duplicate_vision_frame(video_id, frame_id)
+        if frame is None:
+            return False
+        await self._process_claimed_frame(video_id, frame)
+        return True
+
+    async def _process_claimed_frame(self, video_id: str, frame: dict) -> None:
         started = time.perf_counter()
         analyzed_at = datetime.now(timezone.utc).isoformat()
         image_path = self.frame_root / video_id / frame["image_name"]
@@ -65,5 +75,3 @@ class VisionAnalysisService:
                 error=str(exc),
                 duration_ms=round((time.perf_counter() - started) * 1000),
             )
-        return True
-

@@ -122,6 +122,9 @@ def test_folder_scan_recurses_dates_and_skips_duplicate_without_api(
     assert len(videos) == 1
     assert videos[0]["media_created_at"].startswith("2024-05-17")
     assert videos[0]["source_kind"] == "folder"
+    assert videos[0]["source_folder"] == str(
+        (source_dir / "活动").resolve()
+    )
     assert videos[0]["index_status"] == "pending_analysis"
     assert len(database.get_video(videos[0]["id"])["frames"]) == 2
     assert provider.calls == []

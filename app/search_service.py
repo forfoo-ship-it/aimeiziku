@@ -7,23 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.database import Database
-
-
-SYNONYM_GROUPS: tuple[tuple[str, ...], ...] = (
-    ("发力", "加速", "冲刺"),
-    ("击鼓", "打鼓", "擂鼓"),
-    ("欢呼", "呐喊", "喝彩"),
-    ("航拍", "空中", "俯瞰", "无人机"),
-    ("夜景", "夜晚", "夜间"),
-    ("近景", "近距离"),
-    ("特写", "局部", "细节"),
-    ("全景", "大场景", "远景"),
-    ("横屏", "横版", "横向"),
-    ("竖屏", "竖版", "纵向"),
-    ("采访", "同期声", "受访者"),
-    ("古建筑", "古城", "传统建筑"),
-    ("表演", "演出", "展演"),
-)
+from app.search_vocabulary import SYNONYM_GROUPS
 
 FIELD_WEIGHTS = {
     "subjects": 22.0,

@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from app import main
 from app.database import Database
 from app.search_service import SearchService
-from app.vision_provider import VisionResult
+from app.vision_provider import VisionResult, VisionSearchAliases
 
 
 def result_json(
@@ -21,6 +21,7 @@ def result_json(
     scene: list[str],
     shot_type: list[str],
     ocr_text: list[str],
+    search_aliases: dict[str, list[str]] | None = None,
 ) -> str:
     return VisionResult(
         summary=summary,
@@ -29,6 +30,7 @@ def result_json(
         scene=scene,
         shot_type=shot_type,
         ocr_text=ocr_text,
+        search_aliases=VisionSearchAliases.model_validate(search_aliases or {}),
         confidence=0.94,
     ).model_dump_json()
 
@@ -150,6 +152,86 @@ def test_shot_type_synonym_finds_indexed_shot(search_database: Database) -> None
     horizontal = SearchService(search_database).search("横版")
     assert horizontal.results[0]["shot_type"][0] == "横屏"
     assert "shot_type" in horizontal.results[0]["matched_fields"]
+
+
+def test_business_abbreviation_finds_full_label_without_false_positive(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "business-synonym.db")
+    database.initialize()
+    add_video_with_results(
+        database,
+        video_id="display-board-video",
+        video_name="display-board.mp4",
+        results=[
+            (
+                0,
+                result_json(
+                    summary="工作人员站在活动展示牌旁",
+                    subjects=["工作人员", "展示牌"],
+                    actions=["站立"],
+                    scene=["活动现场"],
+                    shot_type=["横屏", "中景"],
+                    ocr_text=[],
+                ),
+            ),
+            (
+                5_000,
+                result_json(
+                    summary="运动员手持奖牌",
+                    subjects=["运动员", "奖牌"],
+                    actions=["展示奖牌"],
+                    scene=["颁奖现场"],
+                    shot_type=["横屏", "近景"],
+                    ocr_text=[],
+                ),
+            ),
+        ],
+    )
+
+    response = SearchService(database).search("展牌")
+    assert [result["timestamp"] for result in response.results] == [0.0]
+    assert response.results[0]["subjects"] == ["工作人员", "展示牌"]
+    assert "subjects" in response.results[0]["matched_fields"]
+
+
+def test_model_generated_alias_is_indexed_without_query_time_ai(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "model-alias.db")
+    database.initialize()
+    add_video_with_results(
+        database,
+        video_id="score-screen-video",
+        video_name="score-screen.mp4",
+        results=[
+            (
+                0,
+                result_json(
+                    summary="比赛现场的大型赛事计分显示屏",
+                    subjects=["赛事计分显示屏"],
+                    actions=[],
+                    scene=["比赛现场"],
+                    shot_type=["横屏", "全景"],
+                    ocr_text=["3:2"],
+                    search_aliases={
+                        "subjects": ["比分屏", "计分屏"],
+                    },
+                ),
+            )
+        ],
+    )
+
+    response = SearchService(database).search("比分屏")
+    assert response.count == 1
+    assert response.results[0]["subjects"] == ["赛事计分显示屏"]
+    assert "subjects" in response.results[0]["matched_fields"]
+    with database.connect() as connection:
+        indexed_subjects = connection.execute(
+            "SELECT subjects FROM frame_search LIMIT 1"
+        ).fetchone()["subjects"]
+    assert "比分屏" in indexed_subjects
+    assert "计分屏" in indexed_subjects
 
 
 def test_ocr_is_searchable(search_database: Database) -> None:

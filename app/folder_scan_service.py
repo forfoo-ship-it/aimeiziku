@@ -279,11 +279,18 @@ class FolderScanService:
                 ),
                 source_kind="folder",
                 source_path=source_key,
+                source_folder=str(resolved.parent),
                 source_size=stat_before.st_size,
                 source_mtime_ns=stat_before.st_mtime_ns,
                 content_sha256=fingerprint,
                 frames=[
-                    (frame.timestamp_ms, frame.image_name) for frame in frames
+                    (
+                        frame.timestamp_ms,
+                        frame.image_name,
+                        frame.duplicate_of_timestamp_ms,
+                        frame.similarity_score,
+                    )
+                    for frame in frames
                 ],
             )
         except Exception:
@@ -308,11 +315,16 @@ class FolderScanService:
             record = self.database.get_video(video_id)
             if record is None:
                 return
+            analyzable_frames = [
+                frame
+                for frame in record["frames"]
+                if frame["vision_status"] != "duplicate"
+            ]
             completed = sum(
                 frame["vision_status"] in {"success", "failed"}
-                for frame in record["frames"]
+                for frame in analyzable_frames
             )
-            total = len(record["frames"])
+            total = len(analyzable_frames)
             self.database.update_scan_job(
                 job_id,
                 current_file=file_name,
